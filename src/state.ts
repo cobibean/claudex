@@ -18,6 +18,11 @@ export interface ManagedPaths {
   runtimeRoot: string;
   runtimeDir: string;
   runtimeBinary: string;
+  claudexRuntimeRoot: string;
+  claudeRuntimeRoot: string;
+  releasesDir: string;
+  currentRelease: string;
+  previousRelease: string;
   proxyDir: string;
   proxyConfig: string;
   proxyKey: string;
@@ -26,10 +31,13 @@ export interface ManagedPaths {
   runDir: string;
   proxyState: string;
   startLock: string;
+  sessionStartLock: string;
   sessionsDir: string;
   logsDir: string;
   proxyLog: string;
   resolvedClaude: string;
+  updateLock: string;
+  updateJournal: string;
 }
 
 export interface ManagedState {
@@ -50,6 +58,11 @@ export function resolvePaths(home: string): ManagedPaths {
     runtimeRoot: join(absoluteHome, "runtime", "cliproxyapi"),
     runtimeDir,
     runtimeBinary: join(runtimeDir, "cli-proxy-api"),
+    claudexRuntimeRoot: join(absoluteHome, "runtime", "claudex"),
+    claudeRuntimeRoot: join(absoluteHome, "runtime", "claude"),
+    releasesDir: join(absoluteHome, "releases"),
+    currentRelease: join(absoluteHome, "releases", "current"),
+    previousRelease: join(absoluteHome, "releases", "previous"),
     proxyDir: join(absoluteHome, "proxy"),
     proxyConfig: join(absoluteHome, "proxy", "config.yaml"),
     proxyKey: join(absoluteHome, "proxy", "api-key"),
@@ -58,10 +71,13 @@ export function resolvePaths(home: string): ManagedPaths {
     runDir: join(absoluteHome, "run"),
     proxyState: join(absoluteHome, "run", "proxy.json"),
     startLock: join(absoluteHome, "run", "start.lock"),
+    sessionStartLock: join(absoluteHome, "run", "session-start.lock"),
     sessionsDir: join(absoluteHome, "run", "sessions"),
     logsDir: join(absoluteHome, "logs"),
     proxyLog: join(absoluteHome, "logs", "proxy.log"),
-    resolvedClaude: join(absoluteHome, "run", "claude")
+    resolvedClaude: join(absoluteHome, "run", "claude"),
+    updateLock: join(absoluteHome, "run", "update.lock"),
+    updateJournal: join(absoluteHome, "run", "update-journal.json")
   };
 }
 
@@ -106,6 +122,9 @@ export async function ensureManagedState(home: string): Promise<ManagedState> {
     paths.authDir,
     paths.binDir,
     paths.runtimeRoot,
+    paths.claudexRuntimeRoot,
+    paths.claudeRuntimeRoot,
+    paths.releasesDir,
     paths.proxyDir,
     paths.runDir,
     paths.sessionsDir,

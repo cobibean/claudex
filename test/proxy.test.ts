@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { probeProxy } from "../src/proxy.js";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { activeSessions, claimSessionStart, probeProxy } from "../src/proxy.js";
+import { resolvePaths } from "../src/state.js";
 
 describe("managed proxy readiness", () => {
   it("requires authenticated model readiness, not just liveness", async () => {
@@ -36,5 +40,21 @@ describe("managed proxy readiness", () => {
     await expect(
       probeProxy({ baseUrl: "http://127.0.0.1:8317", apiKey: "wrong", fetchImpl })
     ).resolves.toEqual({ live: true, authenticated: false, modelAvailable: false });
+  });
+
+  it("interlocks session startup with an update and exposes an exec-in-progress session", async () => {
+    const home = await mkdtemp(join(tmpdir(), "claudex-session-interlock-"));
+    const paths = resolvePaths(home);
+    await mkdir(paths.sessionsDir, { recursive: true });
+    await writeFile(paths.updateLock, JSON.stringify({ pid: 999_999 }));
+
+    await expect(claimSessionStart(paths, process.pid, "/private/claude")).rejects.toThrow(
+      /update is in progress/
+    );
+    await rm(paths.updateLock);
+    await claimSessionStart(paths, process.pid, "/private/claude");
+    await expect(activeSessions(paths)).resolves.toMatchObject([
+      { pid: process.pid, claudePath: "/private/claude", state: "starting" }
+    ]);
   });
 });

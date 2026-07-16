@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Check, test, build, and pack
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.1
+          run_install: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.15.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm check
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Pack and verify installed bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack_dir="$RUNNER_TEMP/claudex-pack"
+          prefix="$RUNNER_TEMP/claudex-global"
+          version="$(node --input-type=module -e 'import p from "./package.json" with {type:"json"}; process.stdout.write(p.version)')"
+          mkdir -p "$pack_dir" "$prefix"
+          pnpm pack --pack-destination "$pack_dir"
+          asset="$pack_dir/claudex-$version.tgz"
+          test -f "$asset"
+          tar -tzf "$asset" >"$pack_dir/contents.txt"
+          grep -Fx 'package/bin/claudex' "$pack_dir/contents.txt" >/dev/null
+          grep -Fx 'package/dist/bootstrap.js' "$pack_dir/contents.txt" >/dev/null
+          grep -Fx 'package/dist/cli.js' "$pack_dir/contents.txt" >/dev/null
+          npm install --global --prefix "$prefix" "$asset"
+          actual_version="$(CLAUDEX_HOME="$RUNNER_TEMP/empty-claudex-home" \
+            "$prefix/bin/claudex" --version)"
+          test "$actual_version" = "$version"
+          CLAUDEX_HOME="$RUNNER_TEMP/empty-claudex-home" \
+            "$prefix/bin/claudex" --help >/dev/null
+
+      - name: Generate and verify a real packed release record
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack_dir="$RUNNER_TEMP/claudex-pack"
+          version="$(node --input-type=module -e 'import p from "./package.json" with {type:"json"}; process.stdout.write(p.version)')"
+          private_key="$RUNNER_TEMP/ci-release-key.pem"
+          public_key="$RUNNER_TEMP/ci-release-public.pem"
+          openssl genpkey -algorithm ED25519 -out "$private_key"
+          openssl pkey -in "$private_key" -pubout -out "$public_key"
+          node scripts/release-manifest.mjs generate \
+            --asset "$pack_dir/claudex-$version.tgz" \
+            --out "$pack_dir/release.json" \
+            --tag "v$version"
+          CLAUDEX_RELEASE_PRIVATE_KEY_PEM="$(<"$private_key")" \
+            node scripts/release-manifest.mjs sign \
+              --manifest "$pack_dir/release.json" \
+              --signature "$pack_dir/release.sig"
+          node scripts/release-manifest.mjs verify \
+            --manifest "$pack_dir/release.json" \
+            --signature "$pack_dir/release.sig" \
+            --public-key "$public_key" \
+            --asset "$pack_dir/claudex-$version.tgz" \
+            --expected-tag "v$version"

@@ -14,6 +14,8 @@ describe("Claude Code routing overlay", () => {
     expect(settings.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8317");
     expect(settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("gpt-5.6-sol");
     expect(settings.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe("gpt-5.6-sol");
+    expect(settings.env.DISABLE_UPDATES).toBe("1");
+    expect(settings.env.DISABLE_AUTOUPDATER).toBe("1");
     expect(settings.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
     expect(JSON.stringify(settings)).not.toContain("ANTHROPIC_AUTH_TOKEN");
   });

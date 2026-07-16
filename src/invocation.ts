@@ -1,5 +1,6 @@
 import { CONFLICTING_ENV_KEYS } from "./claude.js";
 import { validateForwardedArgs } from "./claude-settings.js";
+import { UsageError } from "./errors.js";
 
 export type Invocation =
   | { kind: "launch"; args: string[] }
@@ -7,12 +8,17 @@ export type Invocation =
   | { kind: "logout"; yes: boolean }
   | { kind: "status"; json: boolean }
   | { kind: "doctor"; json: boolean }
+  | { kind: "update"; action: "apply" | "check" | "rollback"; json: boolean }
   | { kind: "proxy"; action: "start" | "stop" | "restart" | "logs"; force: boolean }
   | { kind: "help" }
   | { kind: "version" };
 
 function unknownFlags(args: readonly string[], allowed: readonly string[]): string[] {
   return args.filter((arg) => arg.startsWith("-") && !allowed.includes(arg));
+}
+
+function duplicateFlags(args: readonly string[]): string[] {
+  return [...new Set(args.filter((arg, index) => arg.startsWith("-") && args.indexOf(arg) !== index))];
 }
 
 export function parseInvocation(args: readonly string[]): Invocation {
@@ -25,27 +31,42 @@ export function parseInvocation(args: readonly string[]): Invocation {
   }
   if (command === "login") {
     const unknown = unknownFlags(rest, ["--device", "--no-browser"]);
-    if (unknown.length > 0) throw new Error(`Unknown login option: ${unknown.join(", ")}`);
+    if (unknown.length > 0) throw new UsageError(`Unknown login option: ${unknown.join(", ")}`);
     return { kind: "login", device: rest.includes("--device"), noBrowser: rest.includes("--no-browser") };
   }
   if (command === "logout") {
     const unknown = unknownFlags(rest, ["--yes"]);
-    if (unknown.length > 0) throw new Error(`Unknown logout option: ${unknown.join(", ")}`);
+    if (unknown.length > 0) throw new UsageError(`Unknown logout option: ${unknown.join(", ")}`);
     return { kind: "logout", yes: rest.includes("--yes") };
   }
   if (command === "status" || command === "doctor") {
     const unknown = unknownFlags(rest, ["--json"]);
-    if (unknown.length > 0) throw new Error(`Unknown ${command} option: ${unknown.join(", ")}`);
+    if (unknown.length > 0) throw new UsageError(`Unknown ${command} option: ${unknown.join(", ")}`);
     return { kind: command, json: rest.includes("--json") };
+  }
+  if (command === "update") {
+    const unknown = unknownFlags(rest, ["--check", "--rollback", "--json"]);
+    const positional = rest.filter((arg) => !arg.startsWith("-"));
+    const duplicates = duplicateFlags(rest);
+    const invalid = [...unknown, ...positional, ...duplicates];
+    if (invalid.length > 0) throw new UsageError(`Unknown update option: ${invalid.join(", ")}`);
+    if (rest.includes("--check") && rest.includes("--rollback")) {
+      throw new UsageError("--check and --rollback cannot be combined.");
+    }
+    return {
+      kind: "update",
+      action: rest.includes("--check") ? "check" : rest.includes("--rollback") ? "rollback" : "apply",
+      json: rest.includes("--json")
+    };
   }
   if (command === "proxy") {
     const action = rest[0];
     if (!action || !["start", "stop", "restart", "logs"].includes(action)) {
-      throw new Error("Usage: claudex proxy start|stop|restart|logs [--force]");
+      throw new UsageError("Usage: claudex proxy start|stop|restart|logs [--force]");
     }
     const trailing = rest.slice(1);
     const unknown = unknownFlags(trailing, ["--force"]);
-    if (unknown.length > 0) throw new Error(`Unknown proxy option: ${unknown.join(", ")}`);
+    if (unknown.length > 0) throw new UsageError(`Unknown proxy option: ${unknown.join(", ")}`);
     return {
       kind: "proxy",
       action: action as "start" | "stop" | "restart" | "logs",
@@ -90,6 +111,8 @@ export function buildClaudeExec(input: ClaudeExecInput): ClaudeExecSpec {
   );
   for (const key of CONFLICTING_ENV_KEYS) delete env[key];
   Object.assign(env, input.routingEnv);
+  env.DISABLE_UPDATES = "1";
+  env.DISABLE_AUTOUPDATER = "1";
   if (!useSettings) {
     if (!input.proxyApiKey) throw new Error("A local proxy key is required for this Claude subcommand.");
     env.ANTHROPIC_AUTH_TOKEN = input.proxyApiKey;

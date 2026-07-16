@@ -1,0 +1,202 @@
+name: Publish certified release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify and bundle certified release
+    runs-on: macos-14
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify private release destination
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "cobibean/claudex"
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "private"
+
+      - name: Require the tagged commit to be on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show-ref --verify refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.1
+          run_install: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.15.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify source and tests
+        run: |
+          pnpm check
+          pnpm test
+          pnpm build
+
+      - name: Pack certified Claudex artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          pnpm pack --pack-destination release-assets
+          version="$(node --input-type=module -e 'import p from "./package.json" with {type:"json"}; process.stdout.write(p.version)')"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test -f "release-assets/claudex-$version.tgz"
+
+      - name: Verify packed permanent bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          asset="release-assets/claudex-$version.tgz"
+          prefix="$RUNNER_TEMP/claudex-global"
+          claudex_home="$RUNNER_TEMP/claudex-packed-home"
+          mkdir -p "$prefix" "$claudex_home"
+          chmod 700 "$claudex_home"
+          tar -tzf "$asset" >"$RUNNER_TEMP/claudex-contents.txt"
+          grep -Fx 'package/bin/claudex' "$RUNNER_TEMP/claudex-contents.txt" >/dev/null
+          grep -Fx 'package/dist/bootstrap.js' "$RUNNER_TEMP/claudex-contents.txt" >/dev/null
+          grep -Fx 'package/dist/cli.js' "$RUNNER_TEMP/claudex-contents.txt" >/dev/null
+          grep -Fx 'package/dist/compatibility.js' "$RUNNER_TEMP/claudex-contents.txt" >/dev/null
+          grep -Fx 'package/dist/update.js' "$RUNNER_TEMP/claudex-contents.txt" >/dev/null
+          npm install --global --prefix "$prefix" "$asset"
+          test "$(CLAUDEX_HOME="$claudex_home" "$prefix/bin/claudex" --version)" = "$version"
+          CLAUDEX_HOME="$claudex_home" "$prefix/bin/claudex" --help >/dev/null
+
+      - name: Require a new monotonic release sequence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous="$RUNNER_TEMP/previous-release"
+          mkdir -p "$previous"
+          if gh release view --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release download --repo "$GITHUB_REPOSITORY" \
+              --pattern release.json --pattern release.sig --dir "$previous"
+            node scripts/release-manifest.mjs verify \
+              --manifest "$previous/release.json" \
+              --signature "$previous/release.sig"
+            previous_sequence="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sequence))' "$previous/release.json")"
+            next_sequence="$(node --input-type=module -e 'import("./dist/compatibility.js").then(m => process.stdout.write(String(m.RELEASE_SEQUENCE)))')"
+            test "$next_sequence" -gt "$previous_sequence"
+          fi
+
+      - name: Generate canonical release record
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/release-manifest.mjs generate \
+            --asset "release-assets/claudex-$version.tgz" \
+            --out release-assets/release.json \
+            --tag "$GITHUB_REF_NAME"
+
+      - name: Stage verified release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p release-bundle/dist
+          cp "release-assets/claudex-$version.tgz" release-bundle/
+          cp release-assets/release.json release-bundle/
+          cp dist/compatibility.js release-bundle/dist/
+
+      - name: Upload verified release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: claudex-release-${{ github.sha }}
+          path: release-bundle/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Sign and publish certified release
+    needs: verify
+    runs-on: macos-14
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.15.0
+
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: claudex-release-${{ github.sha }}
+          path: release-bundle
+
+      - name: Sign release record
+        env:
+          CLAUDEX_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.CLAUDEX_RELEASE_PRIVATE_KEY_PEM }}
+        run: >-
+          node scripts/release-manifest.mjs sign
+          --manifest release-bundle/release.json
+          --signature release-bundle/release.sig
+
+      - name: Verify signed release assets with bundled compatibility key
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/release-manifest.mjs verify \
+            --manifest release-bundle/release.json \
+            --signature release-bundle/release.sig \
+            --compatibility release-bundle/dist/compatibility.js \
+            --asset "release-bundle/claudex-$version.tgz" \
+            --expected-tag "$GITHUB_REF_NAME"
+
+      - name: Publish private GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "release-bundle/claudex-$version.tgz" \
+            release-bundle/release.json \
+            release-bundle/release.sig \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Claudex $version" \
+            --generate-notes

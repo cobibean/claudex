@@ -11,6 +11,14 @@ describe("Claudex state", () => {
     const second = await ensureManagedState(home);
     const paths = resolvePaths(home);
 
+    expect(paths.claudexRuntimeRoot).toBe(join(home, "runtime", "claudex"));
+    expect(paths.claudeRuntimeRoot).toBe(join(home, "runtime", "claude"));
+    expect(paths.currentRelease).toBe(join(home, "releases", "current"));
+    expect(paths.previousRelease).toBe(join(home, "releases", "previous"));
+    expect(paths.updateLock).toBe(join(home, "run", "update.lock"));
+    expect(paths.updateJournal).toBe(join(home, "run", "update-journal.json"));
+    expect(paths.sessionStartLock).toBe(join(home, "run", "session-start.lock"));
+
     expect(first.apiKey).toBe(second.apiKey);
     expect(first.apiKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect((await stat(home)).mode & 0o777).toBe(0o700);

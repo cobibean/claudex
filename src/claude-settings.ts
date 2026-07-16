@@ -1,3 +1,5 @@
+import { UsageError } from "./errors.js";
+
 export const MODEL = "gpt-5.6-sol";
 export const PROXY_BASE_URL = "http://127.0.0.1:8317";
 
@@ -15,6 +17,20 @@ const FORBIDDEN_FLAGS = [
   "--setting-sources",
   "--remote-control"
 ] as const;
+
+const MANAGED_MUTATION_COMMANDS = new Set(["update", "upgrade", "install", "migrate-installer"]);
+
+function managedMutationCommand(args: readonly string[]): string | null {
+  for (let index = 0; index < args.length; index += 1) {
+    const candidate = args[index] ?? "";
+    if (candidate === "--") break;
+    if (!MANAGED_MUTATION_COMMANDS.has(candidate)) continue;
+    const previous = args[index - 1];
+    if (previous === "-p" || previous === "--print") continue;
+    return candidate;
+  }
+  return null;
+}
 
 export function buildClaudeSettings(apiKeyHelper: string): ClaudeSettings {
   return {
@@ -36,18 +52,24 @@ export function buildClaudeSettings(apiKeyHelper: string): ClaudeSettings {
         "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking",
       CLAUDE_CODE_ATTRIBUTION_HEADER: "0",
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
-      CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: "1"
+      CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: "1",
+      DISABLE_UPDATES: "1",
+      DISABLE_AUTOUPDATER: "1"
     }
   };
 }
 
 export function validateForwardedArgs(args: readonly string[]): string[] {
+  const mutationCommand = managedMutationCommand(args);
+  if (mutationCommand) {
+    throw new UsageError(`${mutationCommand} is managed by Claudex and cannot be forwarded to Claude Code.`);
+  }
   for (const arg of args) {
     const forbidden = FORBIDDEN_FLAGS.find(
       (flag) => arg === flag || arg.startsWith(`${flag}=`)
     );
     if (forbidden) {
-      throw new Error(`${forbidden} is not allowed through Claudex because it can escape GPT routing.`);
+      throw new UsageError(`${forbidden} is not allowed through Claudex because it can escape GPT routing.`);
     }
   }
   return [...args];

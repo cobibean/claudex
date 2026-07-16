@@ -2,6 +2,7 @@ import { execFile as execFileCallback, spawn } from "node:child_process";
 import { openSync, closeSync } from "node:fs";
 import {
   chmod,
+  lstat,
   mkdir,
   readFile,
   readdir,
@@ -37,6 +38,7 @@ export interface SessionState {
   pid: number;
   claudePath: string;
   startedAt: string;
+  state?: "starting";
 }
 
 export interface ProbeOptions {
@@ -262,7 +264,7 @@ export async function startManagedProxy(managed: ManagedState): Promise<ProxySta
 }
 
 export async function recordSession(paths: ManagedPaths, pid: number, claudePath: string): Promise<void> {
-  const session: SessionState = { pid, claudePath, startedAt: new Date().toISOString() };
+  const session: SessionState = { pid, claudePath, startedAt: new Date().toISOString(), state: "starting" };
   const path = join(paths.sessionsDir, `${pid}.json`);
   await writeFile(path, `${JSON.stringify(session, null, 2)}\n`, { mode: 0o600 });
   await chmod(path, 0o600);
@@ -276,13 +278,68 @@ export async function activeSessions(paths: ManagedPaths): Promise<SessionState[
     try {
       const session = JSON.parse(await readFile(path, "utf8")) as SessionState;
       const command = isProcessAlive(session.pid) ? await processCommand(session.pid) : "";
-      if (command.includes(session.claudePath)) active.push(session);
-      else await rm(path, { force: true });
+      const startedAt = Date.parse(session.startedAt);
+      const recentlyStarting =
+        session.state === "starting" &&
+        Number.isFinite(startedAt) &&
+        Date.now() - startedAt < 30_000;
+      if (command.includes(session.claudePath) || (isProcessAlive(session.pid) && recentlyStarting)) {
+        active.push(session);
+      } else {
+        await rm(path, { force: true });
+      }
     } catch {
       await rm(path, { force: true });
     }
   }
   return active;
+}
+
+export async function withSessionStartLock<T>(
+  paths: ManagedPaths,
+  operation: () => Promise<T>
+): Promise<T> {
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    try {
+      await mkdir(paths.sessionStartLock, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        const details = await stat(paths.sessionStartLock);
+        if (Date.now() - details.mtimeMs > 30_000) {
+          await rm(paths.sessionStartLock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error("Timed out waiting for a Claudex session-start interlock.");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    await rm(paths.sessionStartLock, { recursive: true, force: true });
+  }
+}
+
+export async function claimSessionStart(
+  paths: ManagedPaths,
+  pid: number,
+  claudePath: string
+): Promise<void> {
+  await withSessionStartLock(paths, async () => {
+    try {
+      await lstat(paths.updateLock);
+      throw new Error("A Claudex update is in progress; refusing to start a new session.");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await recordSession(paths, pid, claudePath);
+  });
 }
 
 export async function stopManagedProxy(paths: ManagedPaths, force = false): Promise<boolean> {

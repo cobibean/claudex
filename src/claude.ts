@@ -4,9 +4,10 @@ import { access, chmod, readFile, readdir, realpath, rename, rm, symlink } from 
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ManagedPaths } from "./state.js";
+import { CLAUDE_VERSION } from "./compatibility.js";
 
 const execFile = promisify(execFileCallback);
-export const CLAUDE_VERSION = "2.1.211";
+export { CLAUDE_VERSION };
 
 export interface ClaudeBinary {
   path: string;
@@ -18,6 +19,11 @@ export interface InspectClaudeOptions {
   override?: string | undefined;
   pathValue?: string | undefined;
   launcherPath?: string | undefined;
+  expectedVersion?: string | undefined;
+}
+
+export function selectedClaudeOverride(env: NodeJS.ProcessEnv): string | undefined {
+  return env.CLAUDEX_CLAUDE_BIN ?? env.CLAUDEX_MANAGED_CLAUDE_BIN;
 }
 
 async function findOnPath(name: string, pathValue: string): Promise<string | null> {
@@ -35,13 +41,14 @@ async function findOnPath(name: string, pathValue: string): Promise<string | nul
 }
 
 export async function inspectClaudeBinary(options: InspectClaudeOptions = {}): Promise<ClaudeBinary> {
+  const expectedVersion = options.expectedVersion ?? CLAUDE_VERSION;
   const requested = options.override
     ? isAbsolute(options.override)
       ? options.override
       : resolve(options.override)
     : await findOnPath("claude", options.pathValue ?? process.env.PATH ?? "");
   if (!requested) {
-    throw new Error("Official Claude Code was not found. Install Claude Code 2.1.211 first.");
+    throw new Error(`Official Claude Code was not found. Install Claude Code ${expectedVersion} first.`);
   }
   const path = await realpath(requested);
   if (options.launcherPath) {
@@ -55,19 +62,27 @@ export async function inspectClaudeBinary(options: InspectClaudeOptions = {}): P
   }
   let versionOutput: string;
   try {
-    const result = await execFile(path, ["--version"], { timeout: 5_000 });
+    const result = await execFile(path, ["--version"], {
+      timeout: 5_000,
+      env: {
+        ...process.env,
+        DISABLE_UPDATES: "1",
+        DISABLE_AUTOUPDATER: "1"
+      }
+    });
     versionOutput = `${result.stdout}${result.stderr}`.trim();
   } catch (error) {
     const failure = error as Error & { stdout?: string; stderr?: string };
-    versionOutput = `${failure.stdout ?? ""}${failure.stderr ?? ""}`.trim();
+    const output = `${failure.stdout ?? ""}${failure.stderr ?? ""}`.trim();
+    throw new Error(`Unable to execute the official Claude Code version check${output ? `: ${output}` : "."}`);
   }
   if (!versionOutput.includes("Claude Code")) {
     throw new Error(`${path} is not the official Claude Code CLI.`);
   }
   const match = versionOutput.match(/\b(\d+\.\d+\.\d+)\b/);
   if (!match?.[1]) throw new Error(`Unable to parse Claude Code version from: ${versionOutput}`);
-  if (match[1] !== CLAUDE_VERSION) {
-    throw new Error(`Claudex requires Claude Code ${CLAUDE_VERSION}; found ${match[1]} at ${path}.`);
+  if (match[1] !== expectedVersion) {
+    throw new Error(`Claudex requires Claude Code ${expectedVersion}; found ${match[1]} at ${path}.`);
   }
   return { path, version: match[1], versionOutput };
 }

@@ -8,7 +8,7 @@ It is a launcher and proxy manager—not a Claude Code replacement. Claude Code 
 
 - macOS ARM64
 - Node.js 22.15 or newer
-- Official Claude Code 2.1.211
+- Official Claude Code 2.1.211, installed as a checksum-verified private Claudex runtime
 - CLIProxyAPI 7.2.80, installed and checksum-verified by Claudex
 - GPT-5.6 Sol access through the authenticated Codex account
 
@@ -20,14 +20,17 @@ This is an unsupported integration. Anthropic does not support non-Claude models
 pnpm install
 pnpm test
 pnpm pack
-pnpm add -g ./claudex-0.1.0.tgz
+pnpm add -g ./claudex-0.2.0.tgz
 ```
 
-Claudex never updates Claude Code automatically. Install the pinned official version separately if needed:
+The first update-capable bootstrap can still use the pinned official version already on `PATH`. Migrate to the private managed pair with:
 
 ```bash
-npm install -g @anthropic-ai/claude-code@2.1.211
+claudex login
+claudex update
 ```
+
+Claudex never silently updates. The normal standalone `claude` command, `~/.claude`, and Claude credentials are not modified.
 
 ## First use
 
@@ -54,14 +57,29 @@ claudex login [--device|--no-browser]
 claudex logout [--yes]
 claudex status [--json]
 claudex doctor [--json]
+claudex update [--check|--rollback] [--json]
 claudex proxy start|stop|restart|logs [--force]
 ```
 
 Claudex rejects `--model`, `--fallback-model`, `--settings`, `--setting-sources`, and `--remote-control` because those options could escape the pinned GPT route.
 
+## Certified updates
+
+`claudex update --check` reads the latest stable private GitHub release and reports whether a newer certified Claudex + Claude Code pair is available. `claudex update` verifies the signed release record and both artifacts, smoke-tests the inactive pair through the localhost proxy, then activates the pair atomically. `claudex update --rollback` restores the previous verified pair without using the network.
+
+With `--json`, every update action emits one object with `ok`, `action`, `status`, `current`, `target`, `previous`, `code`, and `message`; progress remains on stderr. Successful updates, up-to-date results, and update-available checks exit `0`. Verification or policy failures exit `1`, and invalid command usage exits `2`.
+
+Updates require the authenticated GitHub CLI because this repository and its releases are private. Claudex refuses updates while sessions are active or when `CLAUDEX_CLAUDE_BIN` is set. Claude Code's own `update`/`upgrade`, `install`, and `migrate-installer` commands are blocked through Claudex so the pair cannot drift.
+
+Claudex requires the freshly staged official artifact to pass strict code-signature validation in addition to its manifest hash and Apple signing identity. It never adopts the mutable standalone installation. Gatekeeper's exact “valid code, not an app” response is recorded as non-applicability for this standalone CLI, while any actual rejection or denial still blocks activation.
+
+Release certification and recovery details are in [docs/update-operations.md](docs/update-operations.md).
+
 ## Runtime and security
 
 Production state lives under `~/.claudex` by default. Set `CLAUDEX_HOME` to use another location or `CLAUDEX_CLAUDE_BIN` to select a specific official Claude executable.
+
+Managed app and Claude runtimes are immutable and versioned under `~/.claudex/runtime`; signed pair records and the atomic current/previous pointers live under `~/.claudex/releases`.
 
 - Proxy listener: `127.0.0.1:8317`
 - Claude-compatible endpoint: `/v1/messages`

@@ -12,4 +12,4 @@ while [ -L "$SCRIPT" ]; do
 done
 DIR=$(CDPATH= cd -P -- "$(dirname -- "$SCRIPT")" && pwd)
 
-exec env NODE_NO_WARNINGS=1 node "$DIR/../dist/cli.js" "$@"
+exec env NODE_NO_WARNINGS=1 node "$DIR/../dist/bootstrap.js" "$@"
