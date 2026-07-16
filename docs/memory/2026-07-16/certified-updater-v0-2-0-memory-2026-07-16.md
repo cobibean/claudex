@@ -51,3 +51,7 @@
 - Complete the post-update comparison for the standalone Claude binary, `~/.claude`, and credential files. Pre-update fingerprints exist, but sensitive hashes are intentionally omitted here.
 - Once Actions budget is restored, prove the storage-free release handoff before relying on it for the next certified release.
 - Do not claim full human acceptance until the interactive, rollback/update-again, and non-interference checks are complete.
+
+## Update - 2026-07-16
+
+- Clarification: `v0.2.0` and its release assets point to release source commit `58524af`, which is on `main`. This memory was added afterward on `main`, so the branch now advances beyond that release commit; no work is isolated on a side branch.
