@@ -78,7 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          asset="release-assets/claudex-$version.tgz"
+          asset="$PWD/release-assets/claudex-$version.tgz"
           prefix="$RUNNER_TEMP/claudex-global"
           claudex_home="$RUNNER_TEMP/claudex-packed-home"
           mkdir -p "$prefix" "$claudex_home"
