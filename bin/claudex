@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+  DIR=$(CDPATH= cd -P -- "$(dirname -- "$SCRIPT")" && pwd)
+  LINK=$(readlink "$SCRIPT")
+  case "$LINK" in
+    /*) SCRIPT="$LINK" ;;
+    *) SCRIPT="$DIR/$LINK" ;;
+  esac
+done
+DIR=$(CDPATH= cd -P -- "$(dirname -- "$SCRIPT")" && pwd)
+
+exec env NODE_NO_WARNINGS=1 node "$DIR/../dist/cli.js" "$@"
