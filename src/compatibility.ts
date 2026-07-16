@@ -18,6 +18,6 @@ export const CERTIFIED_CLAUDE = {
 } as const;
 
 export const RELEASE_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAyk+Thn86ltfnrodEUx2N1XJgP9VkWZivq4X/BrgnGOk=
+MCowBQYDK2VwAyEArMEIa2SKzexx5M7lU3jqpIZ/MzaCnPALjeWP016i+Cs=
 -----END PUBLIC KEY-----
 `;
