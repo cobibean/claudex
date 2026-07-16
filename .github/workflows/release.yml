@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      release_bundle: ${{ steps.encode_bundle.outputs.payload }}
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
@@ -132,11 +134,14 @@ jobs:
           cp release-assets/release.json release-bundle/
           cp dist/compatibility.js release-bundle/dist/
 
-      - name: Cache verified release bundle
-        uses: actions/cache/save@v4
-        with:
-          path: release-bundle/
-          key: claudex-release-${{ github.sha }}
+      - name: Encode verified release bundle
+        id: encode_bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(tar -czf - release-bundle | base64 | tr -d '\n')"
+          test "${#payload}" -lt 900000
+          printf 'payload=%s\n' "$payload" >>"$GITHUB_OUTPUT"
 
   publish:
     name: Sign and publish certified release
@@ -144,7 +149,6 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 10
     permissions:
-      actions: write
       contents: write
     steps:
       - name: Check out tagged source
@@ -158,11 +162,15 @@ jobs:
           node-version: 22.15.0
 
       - name: Restore verified release bundle
-        uses: actions/cache/restore@v4
-        with:
-          path: release-bundle
-          key: claudex-release-${{ github.sha }}
-          fail-on-cache-miss: true
+        env:
+          RELEASE_BUNDLE_BASE64: ${{ needs.verify.outputs.release_bundle }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_BUNDLE_BASE64"
+          printf '%s' "$RELEASE_BUNDLE_BASE64" | base64 -D | tar -xzf -
+          test -f release-bundle/release.json
+          test -f release-bundle/dist/compatibility.js
 
       - name: Sign release record
         env:
@@ -199,14 +207,3 @@ jobs:
             --verify-tag \
             --title "Claudex $version" \
             --generate-notes
-
-      - name: Delete temporary release cache
-        if: ${{ always() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh cache delete "claudex-release-$GITHUB_SHA" \
-            --repo "$GITHUB_REPOSITORY" \
-            --confirm
