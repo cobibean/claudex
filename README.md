@@ -1,4 +1,32 @@
-# Claudex
+<div align="center">
+
+<h1>Claudex</h1>
+
+<p><strong>Run the genuine Claude Code CLI with GPT models through a secure, localhost-only Codex OAuth proxy.</strong></p>
+
+<p>
+  <a href="https://github.com/cobibean/claudex/actions/workflows/ci.yml"><img src="https://github.com/cobibean/claudex/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/cobibean/claudex/releases/latest"><img src="https://img.shields.io/github/v/release/cobibean/claudex?display_name=tag&amp;sort=semver" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+  <a href="#support-and-disclosure"><img src="https://img.shields.io/badge/platform-macOS%20ARM64-black.svg" alt="Platform: macOS ARM64"></a>
+  <a href="#agent-ready-installation"><img src="https://img.shields.io/badge/node-%3E%3D22.15-339933.svg?logo=node.js&amp;logoColor=white" alt="Node.js 22.15 or newer"></a>
+</p>
+
+<p>
+  <a href="#agent-ready-installation">Install</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="SECURITY.md">Security</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://github.com/cobibean/claudex/releases/latest">Latest release</a>
+</p>
+
+<p>Created by <a href="https://github.com/cobibean">Cobi Bean</a> · <a href="https://x.com/cobi_bean">@cobi_bean on Twitter</a></p>
+
+</div>
+
+<p align="center">
+  <img src="assets/claudex-demo.gif" width="800" alt="Claudex launching Claude Code with GPT-5.6 Sol">
+</p>
 
 Claudex launches the genuine Claude Code CLI while routing model requests to GPT-5.6 Sol through a localhost-only [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance and a separate Codex OAuth login.
 
