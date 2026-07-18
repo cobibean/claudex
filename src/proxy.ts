@@ -14,6 +14,7 @@ import {
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { MODEL, PROXY_BASE_URL } from "./claude-settings.js";
+import { buildProxyEnvironment } from "./child-env.js";
 import { installProxyRuntime, sha256File } from "./runtime.js";
 import type { ManagedPaths, ManagedState } from "./state.js";
 
@@ -228,7 +229,7 @@ export async function startManagedProxy(managed: ManagedState): Promise<ProxySta
           cwd: managed.paths.proxyDir,
           detached: true,
           stdio: ["ignore", logFd, logFd],
-          env: process.env
+          env: buildProxyEnvironment(process.env)
         }
       );
       child.unref();

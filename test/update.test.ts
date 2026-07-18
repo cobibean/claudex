@@ -46,6 +46,13 @@ const RELEASE: ReleaseRecord = {
   revokedSequences: []
 };
 
+const CURRENT_RELEASE: ReleaseRecord = {
+  ...RELEASE,
+  sequence: 2,
+  tag: "v0.2.1",
+  claudex: { ...RELEASE.claudex, version: "0.2.1", asset: "claudex-0.2.1.tgz" }
+};
+
 function signedSource(record: ReleaseRecord = RELEASE): {
   publicKey: string;
   source: ReleaseSource;
@@ -335,61 +342,100 @@ describe("managed Claudex updates", () => {
     await expect(readFile(paths.lockFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("uses authenticated private GitHub releases without forwarding credentials to Anthropic", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "claudex-update-github-"));
-    const requests: Array<{ url: string; authorization: string | null; accept: string | null }> = [];
-    const assetUrl = "https://api.github.com/repos/cobibean/claudex/releases/assets/42";
-    const claudeUrl = RELEASE.claude.url;
+  it.each(["GH_TOKEN", "GITHUB_TOKEN"] as const)(
+    "uses an optional %s only for GitHub requests",
+    async (tokenKey) => {
+      const directory = await mkdtemp(join(tmpdir(), "claudex-update-github-"));
+      const requests: Array<{ url: string; authorization: string | null; accept: string | null }> = [];
+      const assetUrl = "https://api.github.com/repos/cobibean/claudex/releases/assets/42";
+      const claudeUrl = RELEASE.claude.url;
+      const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const headers = new Headers(init?.headers);
+        requests.push({
+          url,
+          authorization: headers.get("authorization"),
+          accept: headers.get("accept")
+        });
+        if (url.endsWith("/releases/latest")) {
+          return new Response(
+            JSON.stringify({
+              tag_name: RELEASE.tag,
+              draft: false,
+              prerelease: false,
+              assets: [{ name: "release.json", size: 8, url: assetUrl }]
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response(url === assetUrl ? "github" : "anthropic", { status: 200 });
+      }) as typeof fetch;
+      const source = createGitHubReleaseAdapter({
+        fetchImpl,
+        env: { [tokenKey]: "optional-token" }
+      });
+
+      expect(await source.latest()).toEqual({
+        repository: "cobibean/claudex",
+        tag: "v0.2.0",
+        draft: false,
+        prerelease: false,
+        assets: [{ name: "release.json", size: 8, url: assetUrl }]
+      });
+      await source.download(assetUrl, join(directory, "github-asset"));
+      await source.download(claudeUrl, join(directory, "claude-asset"));
+
+      expect(await readFile(join(directory, "github-asset"), "utf8")).toBe("github");
+      expect(await readFile(join(directory, "claude-asset"), "utf8")).toBe("anthropic");
+      expect(requests).toEqual([
+        {
+          url: "https://api.github.com/repos/cobibean/claudex/releases/latest",
+          authorization: "Bearer optional-token",
+          accept: "application/vnd.github+json"
+        },
+        {
+          url: assetUrl,
+          authorization: "Bearer optional-token",
+          accept: "application/octet-stream"
+        },
+        { url: claudeUrl, authorization: null, accept: "application/octet-stream" }
+      ]);
+    }
+  );
+
+  it("uses public GitHub releases without requiring credentials", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "claudex-update-public-github-"));
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const assetUrl = "https://api.github.com/repos/cobibean/claudex/releases/assets/84";
     const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const headers = new Headers(init?.headers);
-      requests.push({
-        url,
-        authorization: headers.get("authorization"),
-        accept: headers.get("accept")
-      });
+      requests.push({ url, authorization: headers.get("authorization") });
       if (url.endsWith("/releases/latest")) {
         return new Response(
           JSON.stringify({
             tag_name: RELEASE.tag,
             draft: false,
             prerelease: false,
-            assets: [{ name: "release.json", size: 8, url: assetUrl }]
+            assets: [{ name: "release.json", size: 6, url: assetUrl }]
           }),
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
-      return new Response(url === assetUrl ? "github" : "anthropic", { status: 200 });
+      return new Response("public", { status: 200 });
     }) as typeof fetch;
-    const source = createGitHubReleaseAdapter({
-      fetchImpl,
-      tokenProvider: async () => "private-token"
-    });
+    const source = createGitHubReleaseAdapter({ fetchImpl, env: {} });
 
-    expect(await source.latest()).toEqual({
-      repository: "cobibean/claudex",
-      tag: "v0.2.0",
-      draft: false,
-      prerelease: false,
-      assets: [{ name: "release.json", size: 8, url: assetUrl }]
-    });
-    await source.download(assetUrl, join(directory, "github-asset"));
-    await source.download(claudeUrl, join(directory, "claude-asset"));
+    await expect(source.latest()).resolves.toMatchObject({ tag: RELEASE.tag });
+    await source.download(assetUrl, join(directory, "public-asset"));
 
-    expect(await readFile(join(directory, "github-asset"), "utf8")).toBe("github");
-    expect(await readFile(join(directory, "claude-asset"), "utf8")).toBe("anthropic");
+    expect(await readFile(join(directory, "public-asset"), "utf8")).toBe("public");
     expect(requests).toEqual([
       {
         url: "https://api.github.com/repos/cobibean/claudex/releases/latest",
-        authorization: "Bearer private-token",
-        accept: "application/vnd.github+json"
+        authorization: null
       },
-      {
-        url: assetUrl,
-        authorization: "Bearer private-token",
-        accept: "application/octet-stream"
-      },
-      { url: claudeUrl, authorization: null, accept: "application/octet-stream" }
+      { url: assetUrl, authorization: null }
     ]);
   });
 
@@ -772,12 +818,12 @@ describe("managed Claudex updates", () => {
   it("retains only the current and previous managed pairs after activation", async () => {
     const home = await mkdtemp(join(tmpdir(), "claudex-update-retention-"));
     const paths = resolveUpdatePaths(home);
-    await applyTestRelease(home, RELEASE);
+    await applyTestRelease(home, CURRENT_RELEASE);
     await applyTestRelease(home, {
-      ...RELEASE,
-      sequence: 2,
-      tag: "v0.2.1",
-      claudex: { ...RELEASE.claudex, version: "0.2.1", asset: "claudex-0.2.1.tgz" },
+      ...CURRENT_RELEASE,
+      sequence: 3,
+      tag: "v0.2.2",
+      claudex: { ...RELEASE.claudex, version: "0.2.2", asset: "claudex-0.2.2.tgz" },
       claude: {
         ...RELEASE.claude,
         version: "2.1.212",
@@ -785,10 +831,10 @@ describe("managed Claudex updates", () => {
       }
     });
     await applyTestRelease(home, {
-      ...RELEASE,
-      sequence: 3,
-      tag: "v0.2.2",
-      claudex: { ...RELEASE.claudex, version: "0.2.2", asset: "claudex-0.2.2.tgz" },
+      ...CURRENT_RELEASE,
+      sequence: 4,
+      tag: "v0.2.3",
+      claudex: { ...RELEASE.claudex, version: "0.2.3", asset: "claudex-0.2.3.tgz" },
       claude: {
         ...RELEASE.claude,
         version: "2.1.213",
@@ -797,13 +843,13 @@ describe("managed Claudex updates", () => {
     });
 
     expect((await readdir(paths.releasesRoot)).sort()).toEqual([
-      "2",
       "3",
+      "4",
       "current",
       "packaged-fallback.json",
       "previous"
     ]);
-    expect((await readdir(paths.claudexRuntimeRoot)).sort()).toEqual(["0.2.1", "0.2.2"]);
+    expect((await readdir(paths.claudexRuntimeRoot)).sort()).toEqual(["0.2.2", "0.2.3"]);
     expect((await readdir(paths.claudeRuntimeRoot)).sort()).toEqual([
       "2.1.211",
       "2.1.212",
@@ -814,7 +860,7 @@ describe("managed Claudex updates", () => {
   it("rolls the first managed installation back to the packaged private pair and can update again", async () => {
     const home = await mkdtemp(join(tmpdir(), "claudex-update-packaged-rollback-"));
     const paths = resolveUpdatePaths(home);
-    const installed = await applyTestRelease(home, releaseAt(1));
+    const installed = await applyTestRelease(home, CURRENT_RELEASE);
 
     const rollback = await manageUpdate("rollback", paths, {
       platform: "darwin",
@@ -830,11 +876,11 @@ describe("managed Claudex updates", () => {
       ok: true,
       action: "rollback",
       status: "rolled-back",
-      current: { sequence: 0, claudexVersion: "0.2.0", claudeVersion: "2.1.211" },
-      target: { sequence: 0, claudexVersion: "0.2.0", claudeVersion: "2.1.211" },
-      previous: { sequence: 1, claudexVersion: "0.2.0", claudeVersion: "2.1.211" },
+      current: { sequence: 0, claudexVersion: "0.2.1", claudeVersion: "2.1.211" },
+      target: { sequence: 0, claudexVersion: "0.2.1", claudeVersion: "2.1.211" },
+      previous: { sequence: 2, claudexVersion: "0.2.1", claudeVersion: "2.1.211" },
       code: "ROLLED_BACK_TO_PACKAGED",
-      message: "Rolled back to packaged Claudex 0.2.0 with private Claude Code 2.1.211."
+      message: "Rolled back to packaged Claudex 0.2.1 with private Claude Code 2.1.211."
     });
     await expect(readlink(paths.currentLink)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readlink(paths.previousLink)).rejects.toMatchObject({ code: "ENOENT" });
@@ -848,13 +894,13 @@ describe("managed Claudex updates", () => {
     });
     expect(check.current).toEqual({
       sequence: 0,
-      claudexVersion: "0.2.0",
+      claudexVersion: "0.2.1",
       claudeVersion: "2.1.211"
     });
     expect(check.status).toBe("update-available");
 
-    await applyTestRelease(home, releaseAt(1));
-    expect(await readlink(paths.currentLink)).toBe("1");
+    await applyTestRelease(home, CURRENT_RELEASE);
+    expect(await readlink(paths.currentLink)).toBe("2");
     expect(await readFile(paths.packagedFallbackFile, "utf8")).toContain('"claudeVersion":"2.1.211"');
   });
 

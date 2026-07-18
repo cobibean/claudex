@@ -28,14 +28,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify private release destination
+      - name: Verify release destination
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "cobibean/claudex"
-          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "private"
+          visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+          test "$visibility" = "private" || test "$visibility" = "public"
 
       - name: Require the tagged commit to be on main
         shell: bash
@@ -192,7 +193,7 @@ jobs:
             --asset "release-bundle/claudex-$version.tgz" \
             --expected-tag "$GITHUB_REF_NAME"
 
-      - name: Publish private GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

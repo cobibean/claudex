@@ -116,7 +116,8 @@ export interface ReleaseSource {
 
 export interface GitHubReleaseAdapterOptions {
   fetchImpl?: typeof fetch;
-  tokenProvider?: () => Promise<string>;
+  tokenProvider?: () => Promise<string | undefined>;
+  env?: NodeJS.ProcessEnv;
   latestTimeoutMs?: number;
   artifactTimeoutMs?: number;
 }
@@ -138,23 +139,19 @@ async function withAbortTimeout<T>(
   }
 }
 
-async function defaultGitHubTokenProvider(): Promise<string> {
-  const result = await execFile("gh", ["auth", "token"], {
-    timeout: 10_000,
-    maxBuffer: 64 * 1024
-  });
-  const token = result.stdout.trim();
-  if (!token) throw new Error("GitHub CLI did not return an authentication token.");
-  return token;
+function githubTokenFromEnvironment(env: NodeJS.ProcessEnv): string | undefined {
+  const token = env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim();
+  return token || undefined;
 }
 
-function githubHeaders(token: string, accept: string): Record<string, string> {
-  return {
+function githubHeaders(token: string | undefined, accept: string): Record<string, string> {
+  const headers: Record<string, string> = {
     Accept: accept,
-    Authorization: `Bearer ${token}`,
     "X-GitHub-Api-Version": "2022-11-28",
     "User-Agent": "claudex-updater"
   };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
 }
 
 function validateGitHubDownloadRedirect(url: URL): void {
@@ -198,7 +195,8 @@ export function createGitHubReleaseAdapter(
   options: GitHubReleaseAdapterOptions = {}
 ): ReleaseSource {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const tokenProvider = options.tokenProvider ?? defaultGitHubTokenProvider;
+  const tokenProvider =
+    options.tokenProvider ?? (async () => githubTokenFromEnvironment(options.env ?? process.env));
   const latestTimeoutMs = options.latestTimeoutMs ?? 30_000;
   const artifactTimeoutMs = options.artifactTimeoutMs ?? 10 * 60_000;
   const latestUrl = `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/latest`;
@@ -212,7 +210,7 @@ export function createGitHubReleaseAdapter(
           signal
         })
       );
-      if (!response.ok) throw new Error(`Unable to read the private Claudex release: HTTP ${response.status}.`);
+      if (!response.ok) throw new Error(`Unable to read the Claudex release: HTTP ${response.status}.`);
       const value: unknown = await response.json();
       if (!isObject(value) || !Array.isArray(value.assets)) {
         throw new Error("GitHub returned a malformed Claudex release.");

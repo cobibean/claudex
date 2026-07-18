@@ -4,6 +4,7 @@ import { stdin, stdout } from "node:process";
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { hasCodexAuth } from "./claude.js";
+import { buildProxyEnvironment } from "./child-env.js";
 import { stopManagedProxy } from "./proxy.js";
 import { installProxyRuntime } from "./runtime.js";
 import { enforceAuthPermissions, type ManagedState } from "./state.js";
@@ -64,7 +65,7 @@ export async function login(
   const child = spawn(binary, args, {
     cwd: managed.paths.proxyDir,
     stdio: "inherit",
-    env: process.env
+    env: buildProxyEnvironment(process.env)
   });
   const exitCode = await waitForChild(child);
   await enforceAuthPermissions(managed.paths);

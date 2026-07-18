@@ -1,8 +1,24 @@
 {
   "name": "claudex",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Launch the genuine Claude Code harness with GPT-5.6 Sol through Codex OAuth.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cobibean/claudex.git"
+  },
+  "homepage": "https://github.com/cobibean/claudex#readme",
+  "bugs": {
+    "url": "https://github.com/cobibean/claudex/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "oauth",
+    "cli",
+    "proxy"
+  ],
   "type": "module",
   "bin": {
     "claudex": "bin/claudex"
@@ -11,7 +27,8 @@
     "bin",
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

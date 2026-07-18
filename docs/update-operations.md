@@ -4,7 +4,7 @@ Claudex updates only when a user runs `claudex update`. There is no watcher, sch
 
 ## Certified pair contract
 
-Each stable private GitHub release is one inseparable Claudex and Claude Code pair. `src/compatibility.ts` is the version, revocation, and trust source consumed by runtime checks, packaging, tests, and release-record generation. A release contains exactly:
+Each stable GitHub release is one inseparable Claudex and Claude Code pair. `src/compatibility.ts` is the version, revocation, and trust source consumed by runtime checks, packaging, tests, and release-record generation. A release contains exactly:
 
 - `claudex-<version>.tgz`
 - `release.json`
@@ -38,7 +38,7 @@ git tag v<claudex-version>
 git push origin v<claudex-version>
 ```
 
-The tag workflow runs the full source suite, packs and installs the permanent bootstrap in isolation, enforces a monotonic sequence, generates the canonical release record in a read-only job, and passes a verified bundle to a separate write-scoped job. That job signs, verifies with the bundled public key, and publishes only the three approved private assets.
+The tag workflow runs the full source suite, packs and installs the permanent bootstrap in isolation, enforces a monotonic sequence, generates the canonical release record in a read-only job, and passes a verified bundle to a separate write-scoped job. That job signs, verifies with the bundled public key, and publishes only the three approved assets. The workflow accepts a private repository during the public-release transition and a public repository afterward, but it always requires the exact `cobibean/claudex` destination.
 
 ## Local transaction and recovery
 

@@ -211,7 +211,7 @@ describe("Claudex bootstrap", () => {
   it("uses only a hash-verified private Claude binary with the packaged rollback fallback", async () => {
     const home = await mkdtemp(join(tmpdir(), "claudex-bootstrap-packaged-"));
     await installPair(home, 1, "0.2.0", "2.1.211");
-    const binary = await installPackagedFallback(home, "0.2.0", "2.1.211");
+    const binary = await installPackagedFallback(home, "0.2.1", "2.1.211");
 
     await expect(selectBootstrapRuntime(home, "/packaged/cli.js")).resolves.toEqual({
       source: "packaged",
@@ -241,7 +241,7 @@ describe("Claudex bootstrap", () => {
       args: ["/node", "/managed/cli.js", "doctor", "--json"],
       env: {
         PATH: "/bin",
-        CLAUDEX_BOOTSTRAP_VERSION: "0.2.0",
+        CLAUDEX_BOOTSTRAP_VERSION: "0.2.1",
         CLAUDEX_BOOTSTRAPPED: "1",
         CLAUDEX_ACTIVE_PAIR_SOURCE: "current",
         CLAUDEX_ACTIVE_PAIR_SEQUENCE: "1",

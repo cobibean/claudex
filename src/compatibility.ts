@@ -1,7 +1,7 @@
-export const CLAUDEX_VERSION = "0.2.0";
+export const CLAUDEX_VERSION = "0.2.1";
 export const CLAUDE_VERSION = "2.1.211";
 export const RELEASE_REPOSITORY = "cobibean/claudex";
-export const RELEASE_SEQUENCE = 1;
+export const RELEASE_SEQUENCE = 2;
 export const REVOKED_SEQUENCES: readonly number[] = [];
 export const RELEASE_SCHEMA_VERSION = 1;
 export const STATE_SCHEMA_VERSION = 1;
