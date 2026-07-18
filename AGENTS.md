@@ -14,7 +14,7 @@ Take a fresh clone to a verified global Claudex installation on macOS ARM64. Per
 ## Execution
 
 1. Verify `uname -s` is `Darwin`, `uname -m` is `arm64`, and Node.js is at least 22.15.
-2. Enable Corepack, activate pnpm 10.33.1, and run `pnpm install --frozen-lockfile`.
+2. Install Corepack 0.34.0 globally, enable it, activate pnpm 10.33.1, and run `pnpm install --frozen-lockfile`.
 3. Run `pnpm check`, `pnpm test`, `pnpm build`, and `pnpm pack`.
 4. Read the current package version from `package.json` and globally install the resulting tarball with npm.
 5. Confirm `claudex --version` matches `package.json`.

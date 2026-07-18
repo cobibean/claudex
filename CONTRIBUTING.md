@@ -5,6 +5,7 @@ Claudex currently supports macOS ARM64 only and distributes through source plus 
 Before opening a pull request:
 
 ```bash
+npm install --global corepack@0.34.0
 corepack enable
 corepack prepare pnpm@10.33.1 --activate
 pnpm install --frozen-lockfile

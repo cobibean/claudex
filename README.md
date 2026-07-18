@@ -28,6 +28,7 @@ test "$(uname -s)" = "Darwin"
 test "$(uname -m)" = "arm64"
 node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 15) ? 0 : 1)'
 
+npm install --global corepack@0.34.0
 corepack enable
 corepack prepare pnpm@10.33.1 --activate
 pnpm install --frozen-lockfile
