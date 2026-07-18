@@ -13,6 +13,9 @@
 </p>
 
 <p>
+  <a href="#what-claudex-is">What it is</a> ·
+  <a href="#why-it-exists">Why it exists</a> ·
+  <a href="#how-it-works">How it works</a> ·
   <a href="#agent-ready-installation">Install</a> ·
   <a href="#commands">Commands</a> ·
   <a href="SECURITY.md">Security</a> ·
@@ -28,9 +31,48 @@
   <img src="assets/claudex-demo.gif" width="800" alt="Claudex launching Claude Code with GPT-5.6 Sol">
 </p>
 
-Claudex launches the genuine Claude Code CLI while routing model requests to GPT-5.6 Sol through a localhost-only [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance and a separate Codex OAuth login.
+## What Claudex is
 
-It is a launcher and proxy manager—not a Claude Code replacement. Claude Code still owns the terminal interface, agent loop, tools, permissions, sessions, `CLAUDE.md`, skills, hooks, plugins, agents, and MCP servers.
+Claudex is a local bridge between Claude Code and Codex. It lets you use the genuine Claude Code terminal experience with GPT-5.6 Sol as the model behind it. You still work inside Claude Code—with its agent loop, tools, permissions, sessions, `CLAUDE.md`, skills, hooks, plugins, agents, and MCP servers—while Claudex handles the local routing and Codex authentication.
+
+It is a launcher and proxy manager, not a fork or replacement for Claude Code. There is no Claudex-hosted relay: the proxy runs only on your Mac, and model requests are sent from it to the authenticated Codex endpoint.
+
+## Why it exists
+
+Some developers like Claude Code as the place they work but want to use GPT-5.6 Sol for the model reasoning. Connecting the two normally means finding a compatible proxy, configuring both sides correctly, protecting existing credentials and settings, and keeping several independently updated pieces from drifting apart.
+
+Claudex packages that work into one command. It installs a certified Claude Code and [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) pair, creates an isolated local configuration, guides you through Codex OAuth, verifies the route, and provides signed updates with rollback. The goal is simple: run `claudex` and get Claude Code powered by GPT-5.6 Sol without hand-building the bridge every time.
+
+## How it works
+
+```text
+You → Claudex → official Claude Code → localhost-only CLIProxyAPI → Codex OAuth → GPT-5.6 Sol
+```
+
+| Claude Code still owns | Claudex handles |
+| --- | --- |
+| Terminal UI and interaction model | Certified Claude Code runtime |
+| Agent loop, tools, and permissions | Local proxy lifecycle and configuration |
+| Sessions and project instructions | Codex OAuth handoff |
+| Hooks, plugins, skills, agents, and MCP | Model routing, integrity checks, updates, and rollback |
+
+Claudex keeps its own state under `~/.claudex`. It does not replace or repurpose your existing `~/.claude`, `~/.codex`, standalone Claude installation, or OAuth credentials.
+
+## Who it is for
+
+Claudex is for developers on Apple Silicon Macs who want to experiment with the Claude Code workflow backed by GPT-5.6 Sol and are comfortable using an unsupported integration. It is intentionally narrow: one platform, one certified runtime pair, one model route, and strong guardrails around local state.
+
+It is not the right fit if you need official support from Anthropic or OpenAI, Windows or Linux support, a hosted service, arbitrary model switching, or a drop-in replacement for every Claude product.
+
+## Give it to your coding agent
+
+The easiest setup path is to hand this repository to a coding agent. Paste this instruction into the agent:
+
+```text
+Clone https://github.com/cobibean/claudex and follow AGENTS.md exactly. Complete every mechanical setup and verification step yourself. Pause only when I must accept the disclosure and complete Codex OAuth, then resume and finish the smoke test.
+```
+
+The agent should make every setup decision from the repository. You only need to review the unsupported-integration disclosure and authorize your Codex account.
 
 ## Support and disclosure
 
