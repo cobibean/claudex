@@ -4,6 +4,7 @@ export const RELEASE_REPOSITORY = "cobibean/claudex";
 export const RELEASE_SEQUENCE = 2;
 export const REVOKED_SEQUENCES: readonly number[] = [];
 export const RELEASE_SCHEMA_VERSION = 1;
+export const PROXY_BRIDGE_SEQUENCE = 3;
 export const STATE_SCHEMA_VERSION = 1;
 export const BOOTSTRAP_SCHEMA_VERSION = 1;
 

@@ -10,6 +10,10 @@ import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { sha256File } from "./release-manifest.mjs";
+import {
+  canonicalizeCertification,
+  readCertificationSourceState
+} from "./verify-claude-certification.mjs";
 
 const execFile = promisify(execFileCallback);
 const RELEASE_BASE = "https://downloads.claude.ai/claude-code-releases";
@@ -35,6 +39,25 @@ function semver(value) {
 
 function sha256(value) {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+export function validateCertificationOptions(options) {
+  if (options.expectedSha256 !== undefined && !sha256(options.expectedSha256)) {
+    fail("--expected-sha256 is invalid.");
+  }
+  if (
+    options.expectedSize !== undefined &&
+    (!Number.isSafeInteger(options.expectedSize) || options.expectedSize < 1)
+  ) {
+    fail("--expected-size is invalid.");
+  }
+  if (
+    options.live !== false &&
+    (options.expectedSha256 === undefined || options.expectedSize === undefined)
+  ) {
+    fail("Live certification requires both --expected-sha256 and --expected-size.");
+  }
+  return options;
 }
 
 export function validateClaudeManifest(value, requestedVersion) {
@@ -269,7 +292,13 @@ async function runLiveCompatibility(binary, version, options) {
       afterLogSize = await stat(logPath).then((value) => value.size).catch(() => 0);
     }
     if (afterLogSize <= beforeLogSize) fail("Owned proxy log did not record the candidate smoke request.");
-    return { doctor: true, routedPrompt: true, toolsDisabled: true, proxyObserved: true };
+    return {
+      doctor: true,
+      routedPrompt: true,
+      toolsDisabled: true,
+      proxyObserved: true,
+      priorProxyStateRestored: true
+    };
   } finally {
     await rm(isolatedConfig, { recursive: true, force: true });
   }
@@ -280,17 +309,26 @@ async function runLiveCompatibility(binary, version, options) {
         env: environment,
         timeout: 15_000,
         maxBuffer: 4 * 1024 * 1024
-      }).catch(() => undefined);
+      });
+    }
+    if ((await recordedProxyRunning(claudexHome)) !== proxyWasRunning) {
+      fail("Live certification did not restore the prior managed proxy state.");
     }
   }
 }
 
 export async function certifyClaudeCandidate(version, options = {}) {
   if (!semver(version)) fail("Claude Code version must be a semantic version.");
+  validateCertificationOptions(options);
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   if (platform !== "darwin" || arch !== "arm64") fail(`Certification requires darwin/arm64; found ${platform}/${arch}.`);
   const fetchImpl = options.fetchImpl ?? fetch;
+  const projectRoot = resolve(options.projectRoot ?? join(dirname(fileURLToPath(import.meta.url)), ".."));
+  const source = options.sourceState ?? (await readCertificationSourceState(projectRoot));
+  if (options.live !== false && source.dirty) {
+    fail("Live certification evidence must be generated from clean release-critical source.");
+  }
   const manifestUrl = `${RELEASE_BASE}/${version}/manifest.json`;
   const binaryUrl = `${RELEASE_BASE}/${version}/${PLATFORM}/claude`;
   const manifestResponse = await fetchExact(fetchImpl, manifestUrl, "Claude Code manifest");
@@ -322,7 +360,15 @@ export async function certifyClaudeCandidate(version, options = {}) {
     const apple = await inspectAppleIdentity(binary, warnings);
     const live = options.live === false ? null : await runLiveCompatibility(binary, version, options);
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      kind: "claudex-claude-certification",
+      certifiedAt: (options.now?.() ?? new Date()).toISOString(),
+      source,
+      expectations: {
+        sha256: options.expectedSha256 ?? manifest.checksum,
+        size: options.expectedSize ?? manifest.size,
+        matched: options.expectedSha256 !== undefined && options.expectedSize !== undefined
+      },
       version,
       platform: PLATFORM,
       manifest: { url: manifestUrl, commit: manifest.commit, buildDate: manifest.buildDate },
@@ -373,22 +419,14 @@ function parseCli(args) {
     if (Object.hasOwn(options, key)) fail(`${flag} may only be provided once.`);
     options[key] = flag === "--expected-size" ? Number(value) : value;
   }
-  if (options.expectedSha256 !== undefined && !sha256(options.expectedSha256)) {
-    fail("--expected-sha256 is invalid.");
-  }
-  if (
-    options.expectedSize !== undefined &&
-    (!Number.isSafeInteger(options.expectedSize) || options.expectedSize < 1)
-  ) {
-    fail("--expected-size is invalid.");
-  }
+  validateCertificationOptions(options);
   return { version, options };
 }
 
 async function runCli() {
   const { version, options } = parseCli(process.argv.slice(2));
   const report = await certifyClaudeCandidate(version, options);
-  const contents = `${JSON.stringify(report, null, 2)}\n`;
+  const contents = `${canonicalizeCertification(report)}\n`;
   if (options.out) {
     await mkdir(dirname(resolve(options.out)), { recursive: true, mode: 0o700 });
     await writeFile(resolve(options.out), contents, { mode: 0o600 });
