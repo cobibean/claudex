@@ -33,6 +33,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "check:upstreams": "pnpm build && node scripts/check-upstreams.mjs",
     "certify:claude": "pnpm build && node scripts/certify-claude.mjs",
     "release:manifest": "node scripts/release-manifest.mjs generate",
     "release:sign": "node scripts/release-manifest.mjs sign",

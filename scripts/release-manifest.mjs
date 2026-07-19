@@ -214,6 +214,13 @@ export async function generateReleaseRecord({
   const expectedAsset = `claudex-${compatibility.CLAUDEX_VERSION}.tgz`;
   if (basename(assetPath) !== expectedAsset) fail(`Release asset must be named ${expectedAsset}.`);
 
+  const proxyCommit =
+    releaseSequence > (compatibility.PROXY_BRIDGE_SEQUENCE ?? Number.MAX_SAFE_INTEGER)
+      ? runtime.PROXY_RUNTIME.tagCommit
+      : runtime.PROXY_RUNTIME.commit;
+  if (typeof proxyCommit !== "string" || !/^[0-9a-f]{7,64}$/.test(proxyCommit)) {
+    fail("The proxy release commit is invalid for this release sequence.");
+  }
   const record = {
     schemaVersion: compatibility.RELEASE_SCHEMA_VERSION,
     sequence: releaseSequence,
@@ -236,7 +243,7 @@ export async function generateReleaseRecord({
     },
     proxy: {
       version: runtime.PROXY_RUNTIME.version,
-      commit: runtime.PROXY_RUNTIME.commit
+      commit: proxyCommit
     },
     minimumBootstrapSchema: compatibility.BOOTSTRAP_SCHEMA_VERSION,
     minimumStateSchema: compatibility.STATE_SCHEMA_VERSION,

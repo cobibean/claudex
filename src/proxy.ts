@@ -15,7 +15,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { MODEL, PROXY_BASE_URL } from "./claude-settings.js";
 import { buildProxyEnvironment } from "./child-env.js";
-import { installProxyRuntime, sha256File } from "./runtime.js";
+import {
+  installProxyRuntime,
+  PROXY_RUNTIME,
+  sha256File,
+  type ProxyRuntimeIdentity
+} from "./runtime.js";
 import type { ManagedPaths, ManagedState } from "./state.js";
 
 const execFile = promisify(execFileCallback);
@@ -109,7 +114,13 @@ export async function readProxyState(paths: ManagedPaths): Promise<ProxyState | 
 
 async function isOwnedProxy(paths: ManagedPaths, state: ProxyState): Promise<boolean> {
   if (!isProcessAlive(state.pid)) return false;
-  if (state.binaryPath !== paths.runtimeBinary) return false;
+  const runtimePrefix = `${paths.runtimeRoot}/`;
+  if (
+    !state.binaryPath.startsWith(runtimePrefix) ||
+    !/^\d+\.\d+\.\d+\/cli-proxy-api$/.test(state.binaryPath.slice(runtimePrefix.length))
+  ) {
+    return false;
+  }
   const command = await processCommand(state.pid);
   if (!command.includes(state.binaryPath) || !command.includes(paths.proxyConfig)) return false;
   try {
@@ -188,10 +199,17 @@ async function writeProxyState(paths: ManagedPaths, state: ProxyState): Promise<
   await chmod(paths.proxyState, 0o600);
 }
 
-export async function startManagedProxy(managed: ManagedState): Promise<ProxyState> {
+export async function startManagedProxy(
+  managed: ManagedState,
+  runtime: ProxyRuntimeIdentity = PROXY_RUNTIME
+): Promise<ProxyState> {
   return withStartLock(managed.paths, async () => {
     const existing = await readProxyState(managed.paths);
-    if (existing && (await isOwnedProxy(managed.paths, existing))) {
+    if (
+      existing &&
+      existing.binaryPath === managed.paths.runtimeBinary &&
+      (await isOwnedProxy(managed.paths, existing))
+    ) {
       const readinessDeadline = Date.now() + 5_000;
       while (Date.now() < readinessDeadline) {
         const ready = await probeProxy({ baseUrl: PROXY_BASE_URL, apiKey: managed.apiKey });
@@ -209,6 +227,17 @@ export async function startManagedProxy(managed: ManagedState): Promise<ProxySta
       if (isProcessAlive(existing.pid)) process.kill(existing.pid, "SIGKILL");
       await rm(managed.paths.proxyState, { force: true });
     } else if (existing) {
+      if (await isOwnedProxy(managed.paths, existing)) {
+        if ((await activeSessions(managed.paths)).length > 0) {
+          throw new Error("A different certified proxy runtime is active with Claudex sessions; refusing to replace it.");
+        }
+        process.kill(existing.pid, "SIGTERM");
+        const stopDeadline = Date.now() + 5_000;
+        while (isProcessAlive(existing.pid) && Date.now() < stopDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (isProcessAlive(existing.pid)) process.kill(existing.pid, "SIGKILL");
+      }
       await rm(managed.paths.proxyState, { force: true });
     }
 
@@ -217,7 +246,7 @@ export async function startManagedProxy(managed: ManagedState): Promise<ProxySta
       throw new Error(`Port 8317 is already owned by PID ${owners.join(", ")}; Claudex will not reuse or kill it.`);
     }
 
-    await installProxyRuntime(managed.paths);
+    await installProxyRuntime(managed.paths, { runtime });
     await rotateProxyLog(managed.paths);
     const logFd = openSync(managed.paths.proxyLog, "a", 0o600);
     let child;

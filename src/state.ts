@@ -10,6 +10,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { buildClaudeSettings } from "./claude-settings.js";
 import { renderProxyConfig } from "./proxy-config.js";
+import { PROXY_RUNTIME } from "./runtime.js";
 
 export interface ManagedPaths {
   home: string;
@@ -45,12 +46,13 @@ export interface ManagedState {
   apiKey: string;
 }
 
-export const PROXY_VERSION = "7.2.80";
+export const PROXY_VERSION = PROXY_RUNTIME.version;
 export const PROXY_PORT = 8317;
 
-export function resolvePaths(home: string): ManagedPaths {
+export function resolvePaths(home: string, proxyVersion = PROXY_VERSION): ManagedPaths {
   const absoluteHome = resolve(home);
-  const runtimeDir = join(absoluteHome, "runtime", "cliproxyapi", PROXY_VERSION);
+  if (!/^\d+\.\d+\.\d+$/.test(proxyVersion)) throw new Error("Invalid CLIProxyAPI runtime version.");
+  const runtimeDir = join(absoluteHome, "runtime", "cliproxyapi", proxyVersion);
   return {
     home: absoluteHome,
     authDir: join(absoluteHome, "auth"),

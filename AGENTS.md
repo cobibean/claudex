@@ -22,3 +22,13 @@ Take a fresh clone to a verified global Claudex installation on macOS ARM64. Per
 7. After OAuth succeeds, run `claudex update`, `claudex doctor --json`, and `claudex -p "Reply with exactly CLAUDEX_OK. Do not use tools."`.
 
 Setup is complete only when doctor reports `ok: true` and the routed prompt returns `CLAUDEX_OK`. Report any incomplete gate plainly; do not claim success from build output alone.
+
+## Maintainer and automation contract
+
+- Read `docs/README.md` and `docs/maintainer-update-process.md` before changing any production pin, release sequence, update logic, or release workflow.
+- Treat upstream availability as a candidate signal, never as compatibility approval. Claude Code `stable` and `latest` are separate channels and neither may silently choose a release.
+- A scheduled job may discover metadata, compare pins, verify existing signed Claudex releases, and prepare a report. It must not mutate the production `~/.claudex` profile, certify compatibility from version numbers, merge, tag, sign, publish, revoke, or delete without explicit human approval.
+- Keep `src/runtime.ts` and the duplicated proxy directory version in `src/state.ts` synchronized when CLIProxyAPI changes, but do not treat a proxy bump as a routine release: the current updater rejects a target proxy identity different from its own and the signed record does not authorize a proxy artifact. Design and certify the update-protocol migration first. A model-route change also requires a new certified Claudex release.
+- Do not rotate the release signing key as a routine secret replacement. Installed clients trust their compiled public key and cannot consume a release signed only by a replacement key; design a dual-key/key-epoch rollover or explicit reinstall recovery path first.
+- Treat `status` and `doctor` as diagnostic commands, not filesystem-read-only probes: both initialize/regenerate managed state before inspection.
+- Preserve candidate reports and verification evidence without committing credentials, auth state, private signing material, or sensitive local paths.

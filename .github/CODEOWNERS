@@ -1,0 +1,8 @@
+* @cobibean
+
+/.github/ @cobibean
+/scripts/ @cobibean
+/src/compatibility.ts @cobibean
+/src/runtime.ts @cobibean
+/src/update.ts @cobibean
+/certifications/ @cobibean

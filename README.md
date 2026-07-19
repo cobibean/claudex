@@ -18,6 +18,7 @@
   <a href="#how-it-works">How it works</a> ·
   <a href="#agent-ready-installation">Install</a> ·
   <a href="#commands">Commands</a> ·
+  <a href="docs/README.md">Knowledge base</a> ·
   <a href="SECURITY.md">Security</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="https://github.com/cobibean/claudex/releases/latest">Latest release</a>
@@ -153,7 +154,7 @@ Claudex rejects `--model`, `--fallback-model`, `--settings`, `--setting-sources`
 
 Updates are refused while sessions are active or when `CLAUDEX_CLAUDE_BIN` is set. Claude Code's own `update`, `upgrade`, `install`, and `migrate-installer` commands are blocked through Claudex so the pair cannot drift.
 
-Release certification and recovery details are in [Update operations](docs/update-operations.md).
+Release certification and recovery details are in [Update operations](docs/update-operations.md). Maintainers and maintenance agents should start with the [product knowledge base](docs/README.md), especially the [maintainer update process](docs/maintainer-update-process.md) and [update automation boundaries](docs/update-automation.md).
 
 ## Runtime and security
 

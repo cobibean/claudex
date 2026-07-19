@@ -1,58 +1,89 @@
-name: Publish certified release
+name: Verify release readiness
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed release-candidate tag to verify
+        required: true
+        type: string
 
 permissions:
   contents: read
+  checks: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-readiness-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   verify:
-    name: Verify and bundle certified release
+    name: Verify release candidate without publishing
     runs-on: macos-14
     timeout-minutes: 30
     permissions:
       contents: read
-    outputs:
-      release_bundle: ${{ steps.encode_bundle.outputs.payload }}
+      checks: read
     steps:
-      - name: Check out tagged source
-        uses: actions/checkout@v4
+      - name: Validate requested tag syntax
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: Check out candidate tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify release destination
+      - name: Require a verified signed tag at the current main tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "cobibean/claudex"
+          target_sha="$(git rev-parse HEAD)"
+          git show-ref --verify refs/remotes/origin/main
+          test "$target_sha" = "$(git rev-parse refs/remotes/origin/main)"
+          ref_json="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG")"
+          test "$(jq -r '.object.type' <<<"$ref_json")" = "tag"
+          tag_object="$(jq -r '.object.sha' <<<"$ref_json")"
+          tag_json="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object")"
+          test "$(jq -r '.object.type' <<<"$tag_json")" = "commit"
+          test "$(jq -r '.object.sha' <<<"$tag_json")" = "$target_sha"
+          test "$(jq -r '.verification.verified' <<<"$tag_json")" = "true"
+
+      - name: Require exact green CI for the candidate commit
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "cobibean/claudex"
-          visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
-          test "$visibility" = "private" || test "$visibility" = "public"
-
-      - name: Require the tagged commit to be on main
-        shell: bash
-        run: |
-          set -euo pipefail
-          git show-ref --verify refs/remotes/origin/main
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          target_sha="$(git rev-parse HEAD)"
+          checks="$(gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/commits/$target_sha/check-runs?per_page=100")"
+          count="$(jq '[.check_runs[] | select(
+            .name == "Check, test, build, and pack" and
+            .head_sha == $sha and
+            .conclusion == "success" and
+            .app.slug == "github-actions"
+          )] | length' --arg sha "$target_sha" <<<"$checks")"
+          test "$count" = "1"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 10.33.1
           run_install: false
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.15.0
           cache: pnpm
@@ -66,21 +97,47 @@ jobs:
           pnpm test
           pnpm build
 
-      - name: Pack certified Claudex artifact
+      - name: Verify live Claude certification evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          claude_version="$(node --input-type=module -e 'import("./dist/compatibility.js").then(m => process.stdout.write(m.CERTIFIED_CLAUDE.version))')"
+          node scripts/verify-claude-certification.mjs \
+            --report "certifications/claude/$claude_version.json" \
+            --source-root . \
+            --compatibility dist/compatibility.js \
+            --max-age-days 7
+
+      - name: Verify live proxy certification evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          proxy_version="$(node --input-type=module -e 'import("./dist/runtime.js").then(m => process.stdout.write(m.PROXY_RUNTIME.version))')"
+          node scripts/verify-proxy-certification.mjs \
+            --report "certifications/proxy/$proxy_version.json" \
+            --source-root . \
+            --runtime dist/runtime.js \
+            --max-age-days 30
+
+      - name: Pack candidate Claudex artifact
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-assets
           pnpm pack --pack-destination release-assets
           version="$(node --input-type=module -e 'import p from "./package.json" with {type:"json"}; process.stdout.write(p.version)')"
-          test "$GITHUB_REF_NAME" = "v$version"
+          test "$CANDIDATE_TAG" = "v$version"
           test -f "release-assets/claudex-$version.tgz"
 
       - name: Verify packed permanent bootstrap
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${CANDIDATE_TAG#v}"
           asset="$PWD/release-assets/claudex-$version.tgz"
           prefix="$RUNNER_TEMP/claudex-global"
           claudex_home="$RUNNER_TEMP/claudex-packed-home"
@@ -96,115 +153,114 @@ jobs:
           test "$(CLAUDEX_HOME="$claudex_home" "$prefix/bin/claudex" --version)" = "$version"
           CLAUDEX_HOME="$claudex_home" "$prefix/bin/claudex" --help >/dev/null
 
-      - name: Require a new monotonic release sequence
+      - name: Require a new sequence above every signed stable release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          previous="$RUNNER_TEMP/previous-release"
-          mkdir -p "$previous"
-          if gh release view --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release download --repo "$GITHUB_REPOSITORY" \
-              --pattern release.json --pattern release.sig --dir "$previous"
-            node scripts/release-manifest.mjs verify \
-              --manifest "$previous/release.json" \
-              --signature "$previous/release.sig"
-            previous_sequence="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sequence))' "$previous/release.json")"
-            next_sequence="$(node --input-type=module -e 'import("./dist/compatibility.js").then(m => process.stdout.write(String(m.RELEASE_SEQUENCE)))')"
-            test "$next_sequence" -gt "$previous_sequence"
-          fi
+          history="$RUNNER_TEMP/release-history"
+          mkdir -p "$history"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
+          while IFS= read -r tag; do
+            test -z "$tag" && continue
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            mkdir -p "$history/$tag"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern release.json --pattern release.sig --dir "$history/$tag"
+          done
+          next_sequence="$(node --input-type=module -e 'import("./dist/compatibility.js").then(m => process.stdout.write(String(m.RELEASE_SEQUENCE)))')"
+          node scripts/verify-release-history.mjs \
+            --directory "$history" \
+            --next-sequence "$next_sequence"
 
-      - name: Generate canonical release record
+      - name: Generate unsigned canonical release record
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${CANDIDATE_TAG#v}"
           node scripts/release-manifest.mjs generate \
             --asset "release-assets/claudex-$version.tgz" \
             --out release-assets/release.json \
-            --tag "$GITHUB_REF_NAME"
+            --tag "$CANDIDATE_TAG"
 
-      - name: Stage verified release bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          mkdir -p release-bundle/dist
-          cp "release-assets/claudex-$version.tgz" release-bundle/
-          cp release-assets/release.json release-bundle/
-          cp dist/compatibility.js release-bundle/dist/
-
-      - name: Encode verified release bundle
-        id: encode_bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          payload="$(tar -czf - release-bundle | base64 | tr -d '\n')"
-          test "${#payload}" -lt 900000
-          printf 'payload=%s\n' "$payload" >>"$GITHUB_OUTPUT"
-
-  publish:
-    name: Sign and publish certified release
-    needs: verify
-    runs-on: macos-14
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - name: Check out tagged source
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.15.0
-
-      - name: Restore verified release bundle
-        env:
-          RELEASE_BUNDLE_BASE64: ${{ needs.verify.outputs.release_bundle }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$RELEASE_BUNDLE_BASE64"
-          printf '%s' "$RELEASE_BUNDLE_BASE64" | base64 -D | tar -xzf -
-          test -f release-bundle/release.json
-          test -f release-bundle/dist/compatibility.js
-
-      - name: Sign release record
-        env:
-          CLAUDEX_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.CLAUDEX_RELEASE_PRIVATE_KEY_PEM }}
-        run: >-
-          node scripts/release-manifest.mjs sign
-          --manifest release-bundle/release.json
-          --signature release-bundle/release.sig
-
-      - name: Verify signed release assets with bundled compatibility key
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          node scripts/release-manifest.mjs verify \
-            --manifest release-bundle/release.json \
-            --signature release-bundle/release.sig \
-            --compatibility release-bundle/dist/compatibility.js \
-            --asset "release-bundle/claudex-$version.tgz" \
-            --expected-tag "$GITHUB_REF_NAME"
-
-      - name: Publish GitHub Release
+      - name: Prove detached changed-proxy assets with an ephemeral test key
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
-            "release-bundle/claudex-$version.tgz" \
-            release-bundle/release.json \
-            release-bundle/release.sig \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "Claudex $version" \
-            --generate-notes
+          sequence="$(node --input-type=module -e 'import("./dist/compatibility.js").then(m => process.stdout.write(String(m.RELEASE_SEQUENCE)))')"
+          bridge="$(node --input-type=module -e 'import("./dist/compatibility.js").then(m => process.stdout.write(String(m.PROXY_BRIDGE_SEQUENCE)))')"
+          if (( sequence <= bridge )); then
+            printf '%s\n' "Sequence $sequence uses the legacy same-proxy bridge asset contract."
+            exit 0
+          fi
+
+          proxy_version="$(node --input-type=module -e 'import("./dist/runtime.js").then(m => process.stdout.write(m.PROXY_RUNTIME.version))')"
+          proxy_commit="$(node --input-type=module -e 'import("./dist/runtime.js").then(m => process.stdout.write(m.PROXY_RUNTIME.tagCommit))')"
+          proxy_asset="$(node --input-type=module -e 'import("./dist/runtime.js").then(m => process.stdout.write(m.PROXY_RUNTIME.asset))')"
+          proxy_sha="$(node --input-type=module -e 'import("./dist/runtime.js").then(m => process.stdout.write(m.PROXY_RUNTIME.sha256))')"
+          proxy_size="$(node --input-type=module -e 'import("./dist/runtime.js").then(m => process.stdout.write(String(m.PROXY_RUNTIME.size)))')"
+          proxy_binary="$RUNNER_TEMP/cli-proxy-api"
+
+          node scripts/certify-proxy.mjs --offline \
+            --expected-sha256 "$proxy_sha" \
+            --expected-size "$proxy_size" \
+            --archive-out "release-assets/$proxy_asset" \
+            --binary-out "$proxy_binary" \
+            --out "$RUNNER_TEMP/offline-proxy-proof.json"
+          node scripts/update-manifest.mjs generate \
+            --legacy-release release-assets/release.json \
+            --proxy-archive "release-assets/$proxy_asset" \
+            --proxy-binary "$proxy_binary" \
+            --proxy-version "$proxy_version" \
+            --proxy-commit "$proxy_commit" \
+            --out release-assets/update.json
+
+          key="$RUNNER_TEMP/update-test-key.pem"
+          public_key="$RUNNER_TEMP/update-test-public.pem"
+          openssl genpkey -algorithm ED25519 -out "$key"
+          openssl pkey -in "$key" -pubout -out "$public_key"
+          TEST_UPDATE_PRIVATE_KEY_PEM="$(<"$key")" \
+            node scripts/update-manifest.mjs sign \
+              --manifest release-assets/update.json \
+              --signature release-assets/update.sig \
+              --key-env TEST_UPDATE_PRIVATE_KEY_PEM
+          node scripts/update-manifest.mjs verify \
+            --manifest release-assets/update.json \
+            --signature release-assets/update.sig \
+            --legacy-release release-assets/release.json \
+            --public-key "$public_key"
+
+      - name: Stage unsigned verified candidate bundle
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${CANDIDATE_TAG#v}"
+          mkdir -p release-bundle
+          cp "release-assets/claudex-$version.tgz" release-bundle/
+          cp release-assets/release.json release-bundle/
+          if test -f release-assets/update.json; then
+            cp release-assets/update.json release-bundle/
+            cp release-assets/CLIProxyAPI_*_darwin_aarch64.tar.gz release-bundle/
+            cp release-assets/update.sig release-bundle/TEST_KEY_ONLY-update.sig
+            printf '%s\n' \
+              "TEST_KEY_ONLY-update.sig proves detached signing and verification but is not a production signature." \
+              > release-bundle/DETACHED_PROOF_ONLY.txt
+          fi
+          printf '%s\n' "Publication intentionally disabled: no signature, tag mutation, or GitHub Release was produced." \
+            > release-bundle/READINESS_ONLY.txt
+
+      - name: Upload unsigned readiness bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-release-readiness-${{ inputs.tag }}
+          path: release-bundle
+          if-no-files-found: error
+          retention-days: 7
