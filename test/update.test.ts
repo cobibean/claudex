@@ -167,6 +167,7 @@ async function applyTestRelease(
       await writeFile(join(destination, "bin", "claudex"), "#!/bin/sh\n");
     },
     verifyClaudeBinary: async () => [],
+    prepareProxyRuntime: async () => undefined,
     prepareProxy: async () => false,
     restoreProxy: async () => undefined,
     verifyCandidate: async () => undefined,
@@ -183,6 +184,11 @@ describe("managed Claudex updates", () => {
     const home = await mkdtemp(join(tmpdir(), "claudex-update-recovery-"));
     const paths = resolveUpdatePaths(home);
     await mkdir(paths.releasesRoot, { recursive: true });
+    await mkdir(join(paths.releasesRoot, "1"), { recursive: true });
+    await writeFile(
+      join(paths.releasesRoot, "1", "release.json"),
+      JSON.stringify(releaseAt(1))
+    );
     await mkdir(paths.runDir, { recursive: true });
     await symlink("2", paths.currentLink);
     await symlink("1", paths.previousLink);
@@ -241,7 +247,7 @@ describe("managed Claudex updates", () => {
 
     await expect(
       applyTestRelease(home, releaseAt(1), {
-        prepareProxy: async (_paths, recordPriorState) => {
+        prepareProxy: async (_paths, _runtime, recordPriorState) => {
           await recordPriorState(true);
           throw new UpdateInterruption("interrupt after proxy state is durable");
         }
@@ -270,7 +276,7 @@ describe("managed Claudex updates", () => {
     const paths = resolveUpdatePaths(home);
     await expect(
       applyTestRelease(home, releaseAt(1), {
-        prepareProxy: async (_paths, recordPriorState) => {
+        prepareProxy: async (_paths, _runtime, recordPriorState) => {
           await recordPriorState(true);
           throw new UpdateInterruption("leave a recoverable transaction");
         }
@@ -297,7 +303,7 @@ describe("managed Claudex updates", () => {
     const paths = resolveUpdatePaths(home);
     await expect(
       applyTestRelease(home, releaseAt(1), {
-        prepareProxy: async (_paths, recordPriorState) => {
+        prepareProxy: async (_paths, _runtime, recordPriorState) => {
           await recordPriorState(false);
           throw new UpdateInterruption("leave a recoverable transaction");
         }
@@ -818,12 +824,12 @@ describe("managed Claudex updates", () => {
   it("retains only the current and previous managed pairs after activation", async () => {
     const home = await mkdtemp(join(tmpdir(), "claudex-update-retention-"));
     const paths = resolveUpdatePaths(home);
-    await applyTestRelease(home, CURRENT_RELEASE);
+    await applyTestRelease(home, RELEASE);
     await applyTestRelease(home, {
       ...CURRENT_RELEASE,
-      sequence: 3,
-      tag: "v0.2.2",
-      claudex: { ...RELEASE.claudex, version: "0.2.2", asset: "claudex-0.2.2.tgz" },
+      sequence: 2,
+      tag: "v0.2.1",
+      claudex: { ...RELEASE.claudex, version: "0.2.1", asset: "claudex-0.2.1.tgz" },
       claude: {
         ...RELEASE.claude,
         version: "2.1.212",
@@ -832,9 +838,9 @@ describe("managed Claudex updates", () => {
     });
     await applyTestRelease(home, {
       ...CURRENT_RELEASE,
-      sequence: 4,
-      tag: "v0.2.3",
-      claudex: { ...RELEASE.claudex, version: "0.2.3", asset: "claudex-0.2.3.tgz" },
+      sequence: 3,
+      tag: "v0.2.2",
+      claudex: { ...RELEASE.claudex, version: "0.2.2", asset: "claudex-0.2.2.tgz" },
       claude: {
         ...RELEASE.claude,
         version: "2.1.213",
@@ -843,15 +849,13 @@ describe("managed Claudex updates", () => {
     });
 
     expect((await readdir(paths.releasesRoot)).sort()).toEqual([
+      "2",
       "3",
-      "4",
       "current",
-      "packaged-fallback.json",
       "previous"
     ]);
-    expect((await readdir(paths.claudexRuntimeRoot)).sort()).toEqual(["0.2.2", "0.2.3"]);
+    expect((await readdir(paths.claudexRuntimeRoot)).sort()).toEqual(["0.2.1", "0.2.2"]);
     expect((await readdir(paths.claudeRuntimeRoot)).sort()).toEqual([
-      "2.1.211",
       "2.1.212",
       "2.1.213"
     ]);
@@ -868,7 +872,8 @@ describe("managed Claudex updates", () => {
       env: {},
       activeSessionCount: async () => 0,
       verifyClaudeBinary: async () => [],
-      prepareProxy: async () => false,
+      prepareProxyRuntime: async () => undefined,
+    prepareProxy: async () => false,
       restoreProxy: async () => undefined,
       verifyActivated: async () => undefined
     });
@@ -948,7 +953,8 @@ describe("managed Claudex updates", () => {
           env: {},
           activeSessionCount: async () => 0,
           verifyClaudeBinary: async () => [],
-          prepareProxy: async () => false,
+          prepareProxyRuntime: async () => undefined,
+    prepareProxy: async () => false,
           restoreProxy: async () => undefined,
           verifyActivated: async () => undefined,
           onPhase: async (action, phase) => {
@@ -1092,7 +1098,8 @@ describe("managed Claudex updates", () => {
           await writeFile(join(destination, "bin", "claudex"), "#!/bin/sh\n");
         },
         verifyClaudeBinary: async () => [],
-        prepareProxy: async () => false,
+        prepareProxyRuntime: async () => undefined,
+    prepareProxy: async () => false,
         restoreProxy: async () => undefined,
         verifyCandidate: async () => undefined,
         verifyActivated: async () => undefined
@@ -1127,7 +1134,8 @@ describe("managed Claudex updates", () => {
       env: {},
       activeSessionCount: async () => 0,
       verifyClaudeBinary: async () => [],
-      prepareProxy: async () => false,
+      prepareProxyRuntime: async () => undefined,
+    prepareProxy: async () => false,
       restoreProxy: async () => undefined,
       verifyActivated: async (candidate) => {
         activated.push(candidate.record.sequence);

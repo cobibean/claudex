@@ -26,9 +26,11 @@ import {
   BOOTSTRAP_SCHEMA_VERSION,
   CERTIFIED_CLAUDE,
   CLAUDEX_VERSION,
+  PROXY_BRIDGE_SEQUENCE,
   RELEASE_PUBLIC_KEY_PEM,
   RELEASE_REPOSITORY,
   RELEASE_SCHEMA_VERSION,
+  RELEASE_SEQUENCE,
   STATE_SCHEMA_VERSION
 } from "./compatibility.js";
 import {
@@ -43,7 +45,13 @@ import {
   stopManagedProxy,
   withSessionStartLock
 } from "./proxy.js";
-import { PROXY_RUNTIME } from "./runtime.js";
+import {
+  installProxyRuntime,
+  KNOWN_PROXY_RUNTIMES,
+  PROXY_RUNTIME,
+  verifyInstalledRuntime,
+  type ProxyRuntimeIdentity
+} from "./runtime.js";
 import { resolvePaths, type ManagedState } from "./state.js";
 
 const execFile = promisify(execFileCallback);
@@ -95,6 +103,35 @@ export interface ReleaseRecord {
   revokedSequences: number[];
 }
 
+export interface UpdateRecord {
+  schemaVersion: 1;
+  repository: string;
+  tag: string;
+  sequence: number;
+  channel: "stable";
+  legacyReleaseSha256: string;
+  proxyArtifact: {
+    platform: "darwin-arm64";
+    version: string;
+    commit: string;
+    asset: string;
+    size: number;
+    sha256: string;
+    binary: "cli-proxy-api";
+    binarySha256: string;
+  };
+}
+
+interface AuthenticatedRelease {
+  descriptor: ReleaseDescriptor;
+  record: ReleaseRecord;
+  releaseCanonical: string;
+  updateRecord: UpdateRecord | null;
+  updateCanonical: string | null;
+  updateSignature: string | null;
+  proxyRuntime: ProxyRuntimeIdentity;
+}
+
 export interface ReleaseAsset {
   name: string;
   size: number;
@@ -111,6 +148,10 @@ export interface ReleaseDescriptor {
 
 export interface ReleaseSource {
   latest(): Promise<ReleaseDescriptor>;
+  /** Optional bounded release enumeration used by bridge-aware updaters. */
+  enumerate?(): Promise<ReleaseDescriptor[]>;
+  /** Alias retained for injected release sources that expose candidates. */
+  candidates?(): Promise<ReleaseDescriptor[]>;
   download(url: string, destination: string): Promise<void>;
 }
 
@@ -120,6 +161,7 @@ export interface GitHubReleaseAdapterOptions {
   env?: NodeJS.ProcessEnv;
   latestTimeoutMs?: number;
   artifactTimeoutMs?: number;
+  enumerationLimit?: number;
 }
 
 async function withAbortTimeout<T>(
@@ -199,7 +241,45 @@ export function createGitHubReleaseAdapter(
     options.tokenProvider ?? (async () => githubTokenFromEnvironment(options.env ?? process.env));
   const latestTimeoutMs = options.latestTimeoutMs ?? 30_000;
   const artifactTimeoutMs = options.artifactTimeoutMs ?? 10 * 60_000;
+  const enumerationLimit = options.enumerationLimit ?? 20;
+  if (!Number.isSafeInteger(enumerationLimit) || enumerationLimit < 1 || enumerationLimit > 100) {
+    throw new Error("GitHub release enumeration limit must be between 1 and 100.");
+  }
   const latestUrl = `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/latest`;
+  const releasesUrl = `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases?per_page=${enumerationLimit}&page=1`;
+  const parseDescriptor = (value: unknown): ReleaseDescriptor => {
+    if (!isObject(value) || !Array.isArray(value.assets)) {
+      throw new Error("GitHub returned a malformed Claudex release.");
+    }
+    const assets = value.assets.map((asset): ReleaseAsset => {
+      if (
+        !isObject(asset) ||
+        typeof asset.name !== "string" ||
+        typeof asset.size !== "number" ||
+        !Number.isSafeInteger(asset.size) ||
+        asset.size < 0 ||
+        typeof asset.url !== "string"
+      ) {
+        throw new Error("GitHub returned malformed Claudex release assets.");
+      }
+      validateReleaseAssetUrl(asset.url);
+      return { name: asset.name, size: asset.size, url: asset.url };
+    });
+    if (
+      typeof value.tag_name !== "string" ||
+      typeof value.draft !== "boolean" ||
+      typeof value.prerelease !== "boolean"
+    ) {
+      throw new Error("GitHub returned malformed Claudex release metadata.");
+    }
+    return {
+      repository: RELEASE_REPOSITORY,
+      tag: value.tag_name,
+      draft: value.draft,
+      prerelease: value.prerelease,
+      assets
+    };
+  };
   return {
     async latest(): Promise<ReleaseDescriptor> {
       const token = await tokenProvider();
@@ -211,38 +291,39 @@ export function createGitHubReleaseAdapter(
         })
       );
       if (!response.ok) throw new Error(`Unable to read the Claudex release: HTTP ${response.status}.`);
+      return parseDescriptor(await response.json());
+    },
+
+    async enumerate(): Promise<ReleaseDescriptor[]> {
+      const token = await tokenProvider();
+      const [response, latestResponse] = await Promise.all([
+        withAbortTimeout(latestTimeoutMs, "Claudex release enumeration", (signal) =>
+          fetchImpl(releasesUrl, {
+            headers: githubHeaders(token, "application/vnd.github+json"),
+            redirect: "error",
+            signal
+          })
+        ),
+        withAbortTimeout(latestTimeoutMs, "Claudex bridge release lookup", (signal) =>
+          fetchImpl(latestUrl, {
+            headers: githubHeaders(token, "application/vnd.github+json"),
+            redirect: "error",
+            signal
+          })
+        )
+      ]);
+      if (!response.ok) throw new Error(`Unable to enumerate Claudex releases: HTTP ${response.status}.`);
+      if (!latestResponse.ok) {
+        throw new Error(`Unable to read the permanent Claudex bridge: HTTP ${latestResponse.status}.`);
+      }
       const value: unknown = await response.json();
-      if (!isObject(value) || !Array.isArray(value.assets)) {
-        throw new Error("GitHub returned a malformed Claudex release.");
+      if (!Array.isArray(value) || value.length > enumerationLimit) {
+        throw new Error("GitHub returned a malformed or unbounded Claudex release list.");
       }
-      const assets = value.assets.map((asset): ReleaseAsset => {
-        if (
-          !isObject(asset) ||
-          typeof asset.name !== "string" ||
-          typeof asset.size !== "number" ||
-          !Number.isSafeInteger(asset.size) ||
-          asset.size < 0 ||
-          typeof asset.url !== "string"
-        ) {
-          throw new Error("GitHub returned malformed Claudex release assets.");
-        }
-        validateReleaseAssetUrl(asset.url);
-        return { name: asset.name, size: asset.size, url: asset.url };
-      });
-      if (
-        typeof value.tag_name !== "string" ||
-        typeof value.draft !== "boolean" ||
-        typeof value.prerelease !== "boolean"
-      ) {
-        throw new Error("GitHub returned malformed Claudex release metadata.");
-      }
-      return {
-        repository: RELEASE_REPOSITORY,
-        tag: value.tag_name,
-        draft: value.draft,
-        prerelease: value.prerelease,
-        assets
-      };
+      const descriptors = value.map(parseDescriptor);
+      const latest = parseDescriptor(await latestResponse.json());
+      if (!descriptors.some((descriptor) => descriptor.tag === latest.tag)) descriptors.push(latest);
+      return descriptors;
     },
 
     async download(url: string, destination: string): Promise<void> {
@@ -352,11 +433,23 @@ export interface UpdateDependencies {
   sessionStartBarrier(paths: UpdatePaths, operation: () => Promise<number>): Promise<number>;
   hasCodexAuth(paths: UpdatePaths): Promise<boolean>;
   availableBytes(paths: UpdatePaths): Promise<number>;
+  prepareProxyRuntime(
+    paths: UpdatePaths,
+    runtime: ProxyRuntimeIdentity,
+    archivePath?: string
+  ): Promise<void>;
+  verifyProxyRuntime(paths: UpdatePaths, runtime: ProxyRuntimeIdentity): Promise<boolean>;
   prepareProxy(
     paths: UpdatePaths,
-    recordPriorState: (wasRunning: boolean) => Promise<void>
+    runtime: ProxyRuntimeIdentity,
+    recordPriorState: (wasRunning: boolean) => Promise<void>,
+    priorRuntime: ProxyRuntimeIdentity
   ): Promise<boolean>;
-  restoreProxy(paths: UpdatePaths, wasRunning: boolean): Promise<void>;
+  restoreProxy(
+    paths: UpdatePaths,
+    wasRunning: boolean,
+    runtime: ProxyRuntimeIdentity
+  ): Promise<void>;
   extractClaudexArchive(archive: string, destination: string): Promise<void>;
   verifyClaudeBinary(binary: string, expected: ReleaseRecord["claude"]): Promise<string[]>;
   verifyCandidate(candidate: CandidateContext): Promise<void>;
@@ -371,6 +464,7 @@ export interface CandidateContext {
   claudexEntrypoint: string;
   claudeRuntimeDir: string;
   claudeBinary: string;
+  proxyRuntime: ProxyRuntimeIdentity;
   expectedBootstrapSource: "current" | "packaged";
   expectedBootstrapSequence: number | null;
 }
@@ -420,6 +514,75 @@ function canonicalize(value: unknown): string {
 
 export function canonicalizeReleaseRecord(record: ReleaseRecord): string {
   return canonicalize(record);
+}
+
+export function canonicalizeUpdateRecord(record: UpdateRecord): string {
+  return canonicalize(record);
+}
+
+function parseUpdateRecord(contents: string): UpdateRecord {
+  let value: unknown;
+  try {
+    value = JSON.parse(contents);
+  } catch {
+    throw new Error("The signed detached update record is malformed.");
+  }
+  const semver = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+  const sha256 = /^[a-f0-9]{64}$/;
+  if (
+    !isObject(value) ||
+    !exactKeys(value, [
+      "schemaVersion",
+      "repository",
+      "tag",
+      "sequence",
+      "channel",
+      "legacyReleaseSha256",
+      "proxyArtifact"
+    ]) ||
+    value.schemaVersion !== 1 ||
+    typeof value.repository !== "string" ||
+    typeof value.tag !== "string" ||
+    !positiveInteger(value.sequence) ||
+    value.channel !== "stable" ||
+    typeof value.legacyReleaseSha256 !== "string" ||
+    !sha256.test(value.legacyReleaseSha256) ||
+    !isObject(value.proxyArtifact) ||
+    !exactKeys(value.proxyArtifact, [
+      "platform",
+      "version",
+      "commit",
+      "asset",
+      "size",
+      "sha256",
+      "binary",
+      "binarySha256"
+    ]) ||
+    value.proxyArtifact.platform !== "darwin-arm64" ||
+    typeof value.proxyArtifact.version !== "string" ||
+    !semver.test(value.proxyArtifact.version) ||
+    typeof value.proxyArtifact.commit !== "string" ||
+    !/^[a-f0-9]{40}$/.test(value.proxyArtifact.commit) ||
+    value.proxyArtifact.asset !==
+      `CLIProxyAPI_${value.proxyArtifact.version}_darwin_aarch64.tar.gz` ||
+    !positiveInteger(value.proxyArtifact.size) ||
+    typeof value.proxyArtifact.sha256 !== "string" ||
+    !sha256.test(value.proxyArtifact.sha256) ||
+    value.proxyArtifact.binary !== "cli-proxy-api" ||
+    typeof value.proxyArtifact.binarySha256 !== "string" ||
+    !sha256.test(value.proxyArtifact.binarySha256)
+  ) {
+    throw new Error("The signed detached update record is malformed.");
+  }
+  return value as unknown as UpdateRecord;
+}
+
+function decodeSignature(encoded: string, label: string): Buffer {
+  const signature = Buffer.from(encoded, "base64");
+  if (signature.byteLength !== 64 || signature.toString("base64") !== encoded) {
+    throw new Error(`${label} signature encoding is malformed.`);
+  }
+  return signature;
 }
 
 function pairSummary(record: ReleaseRecord): PairSummary {
@@ -618,8 +781,11 @@ async function defaultHasCodexAuth(paths: UpdatePaths): Promise<boolean> {
   }
 }
 
-async function readManagedProxyState(paths: UpdatePaths): Promise<ManagedState> {
-  const managedPaths = resolvePaths(paths.home);
+async function readManagedProxyState(
+  paths: UpdatePaths,
+  runtime: ProxyRuntimeIdentity = PROXY_RUNTIME
+): Promise<ManagedState> {
+  const managedPaths = resolvePaths(paths.home, runtime.version);
   const apiKey = (await readFile(managedPaths.proxyKey, "utf8")).trim();
   if (!/^[A-Za-z0-9_-]{43}$/.test(apiKey)) {
     throw new Error("Managed proxy key is missing or malformed.");
@@ -627,11 +793,32 @@ async function readManagedProxyState(paths: UpdatePaths): Promise<ManagedState> 
   return { paths: managedPaths, apiKey };
 }
 
+async function defaultPrepareProxyRuntime(
+  paths: UpdatePaths,
+  runtime: ProxyRuntimeIdentity,
+  archivePath?: string
+): Promise<void> {
+  const managed = await readManagedProxyState(paths, runtime);
+  await installProxyRuntime(managed.paths, { runtime, ...(archivePath ? { archivePath } : {}) });
+  if (!(await verifyInstalledRuntime(managed.paths, runtime))) {
+    throw new Error("The target proxy runtime could not be verified after staging.");
+  }
+}
+
+async function defaultVerifyProxyRuntime(
+  paths: UpdatePaths,
+  runtime: ProxyRuntimeIdentity
+): Promise<boolean> {
+  return verifyInstalledRuntime(resolvePaths(paths.home, runtime.version), runtime);
+}
+
 async function defaultPrepareProxy(
   paths: UpdatePaths,
-  recordPriorState: (wasRunning: boolean) => Promise<void>
+  runtime: ProxyRuntimeIdentity,
+  recordPriorState: (wasRunning: boolean) => Promise<void>,
+  priorRuntime: ProxyRuntimeIdentity
 ): Promise<boolean> {
-  const managed = await readManagedProxyState(paths);
+  const managed = await readManagedProxyState(paths, runtime);
   const status = await proxyStatus(managed);
   if (status.state && !status.owned) {
     throw new Error("Recorded proxy process no longer matches Claudex ownership metadata.");
@@ -640,11 +827,12 @@ async function defaultPrepareProxy(
   await recordPriorState(wasRunning);
   if (wasRunning) await stopManagedProxy(managed.paths, false);
   try {
-    await startManagedProxy(managed);
+    await startManagedProxy(managed, runtime);
   } catch (error) {
     if (wasRunning) {
       try {
-        await startManagedProxy(managed);
+        const prior = await readManagedProxyState(paths, priorRuntime);
+        await startManagedProxy(prior, priorRuntime);
       } catch (restoreError) {
         throw new AggregateError(
           [error, restoreError],
@@ -657,9 +845,13 @@ async function defaultPrepareProxy(
   return wasRunning;
 }
 
-async function defaultRestoreProxy(paths: UpdatePaths, wasRunning: boolean): Promise<void> {
-  const managed = await readManagedProxyState(paths);
-  if (wasRunning) await startManagedProxy(managed);
+async function defaultRestoreProxy(
+  paths: UpdatePaths,
+  wasRunning: boolean,
+  runtime: ProxyRuntimeIdentity
+): Promise<void> {
+  const managed = await readManagedProxyState(paths, runtime);
+  if (wasRunning) await startManagedProxy(managed, runtime);
   else await stopManagedProxy(managed.paths, false);
 }
 
@@ -925,6 +1117,14 @@ function completeDependencies(
       ((paths, operation) => withSessionStartLock(resolvePaths(paths.home), operation)),
     hasCodexAuth: dependencies.hasCodexAuth ?? defaultHasCodexAuth,
     availableBytes: dependencies.availableBytes ?? defaultAvailableBytes,
+    // An injected proxy lifecycle owns staging/verification as one testable
+    // boundary. Production keeps the immutable, fail-closed defaults.
+    prepareProxyRuntime:
+      dependencies.prepareProxyRuntime ??
+      (dependencies.prepareProxy ? async () => undefined : defaultPrepareProxyRuntime),
+    verifyProxyRuntime:
+      dependencies.verifyProxyRuntime ??
+      (dependencies.prepareProxy ? async () => true : defaultVerifyProxyRuntime),
     prepareProxy: dependencies.prepareProxy ?? defaultPrepareProxy,
     restoreProxy: dependencies.restoreProxy ?? defaultRestoreProxy,
     extractClaudexArchive: dependencies.extractClaudexArchive ?? defaultExtractClaudexArchive,
@@ -976,12 +1176,15 @@ function validateClaudeUrl(url: string, version: string): void {
   }
 }
 
-async function downloadSignedRecord(
+async function authenticateRelease(
   descriptor: ReleaseDescriptor,
   source: ReleaseSource,
   publicKeyPem: string,
   stagingRoot?: string
-): Promise<ReleaseRecord> {
+): Promise<AuthenticatedRelease> {
+  if (descriptor.draft || descriptor.prerelease) {
+    throw new Error("Only stable Claudex releases are accepted.");
+  }
   if (stagingRoot) await mkdir(stagingRoot, { recursive: true, mode: 0o700 });
   const temporary = await mkdtemp(
     join(stagingRoot ?? tmpdir(), stagingRoot ? ".update-metadata-" : "claudex-update-check-")
@@ -1000,26 +1203,148 @@ async function downloadSignedRecord(
     }
     const releaseContents = await readFile(jsonPath, "utf8");
     const record = parseReleaseRecord(releaseContents);
-    if (releaseContents.trim() !== canonicalizeReleaseRecord(record)) {
+    const releaseCanonical = canonicalizeReleaseRecord(record);
+    if (releaseContents.trim() !== releaseCanonical) {
       throw new Error("The signed release record is not canonical JSON.");
     }
     const encodedSignature = (await readFile(signaturePath, "utf8")).trim();
-    const signature = Buffer.from(encodedSignature, "base64");
-    if (signature.byteLength !== 64 || signature.toString("base64") !== encodedSignature) {
-      throw new Error("The Claudex release signature encoding is malformed.");
-    }
     if (!publicKeyPem) throw new Error("Claudex release verification key is not configured.");
-    const valid = verify(
-      null,
-      Buffer.from(canonicalizeReleaseRecord(record)),
-      createPublicKey(publicKeyPem),
-      signature
-    );
-    if (!valid) throw new Error("Claudex release signature verification failed.");
-    return record;
+    const publicKey = createPublicKey(publicKeyPem);
+    if (!verify(null, Buffer.from(releaseCanonical), publicKey, decodeSignature(encodedSignature, "Claudex release"))) {
+      throw new Error("Claudex release signature verification failed.");
+    }
+
+    if (record.sequence <= PROXY_BRIDGE_SEQUENCE) {
+      if (descriptor.assets.length !== 3) {
+        throw new Error("Bridge releases must contain exactly three authenticated assets.");
+      }
+      const expected = new Set(["release.json", "release.sig", record.claudex.asset]);
+      if (descriptor.assets.some((asset) => !expected.has(asset.name))) {
+        throw new Error("Bridge release asset set is invalid.");
+      }
+      const proxyRuntime = knownBridgeRuntime(record);
+      return {
+        descriptor,
+        record,
+        releaseCanonical,
+        updateRecord: null,
+        updateCanonical: null,
+        updateSignature: null,
+        proxyRuntime
+      };
+    }
+
+    if (descriptor.assets.length !== 6) {
+      throw new Error("Post-bridge releases must contain exactly six authenticated assets.");
+    }
+    const updateJsonAsset = findUniqueAsset(descriptor, "update.json");
+    const updateSignatureAsset = findUniqueAsset(descriptor, "update.sig");
+    validateReleaseAssetUrl(updateJsonAsset.url);
+    validateReleaseAssetUrl(updateSignatureAsset.url);
+    const updatePath = join(temporary, "update.json");
+    const updateSignaturePath = join(temporary, "update.sig");
+    await source.download(updateJsonAsset.url, updatePath);
+    await source.download(updateSignatureAsset.url, updateSignaturePath);
+    if (
+      (await stat(updatePath)).size !== updateJsonAsset.size ||
+      (await stat(updateSignaturePath)).size !== updateSignatureAsset.size
+    ) {
+      throw new Error("Detached update metadata size does not match the authenticated release.");
+    }
+    const updateContents = await readFile(updatePath, "utf8");
+    const updateRecord = parseUpdateRecord(updateContents);
+    const updateCanonical = canonicalizeUpdateRecord(updateRecord);
+    if (updateContents.trim() !== updateCanonical) {
+      throw new Error("The signed detached update record is not canonical JSON.");
+    }
+    const updateSignature = (await readFile(updateSignaturePath, "utf8")).trim();
+    if (!verify(null, Buffer.from(updateCanonical), publicKey, decodeSignature(updateSignature, "Detached update"))) {
+      throw new Error("Detached update signature verification failed.");
+    }
+    const legacySha256 = createHash("sha256").update(releaseCanonical).digest("hex");
+    if (
+      updateRecord.repository !== record.repository ||
+      updateRecord.tag !== record.tag ||
+      updateRecord.sequence !== record.sequence ||
+      updateRecord.legacyReleaseSha256 !== legacySha256 ||
+      updateRecord.proxyArtifact.version !== record.proxy.version ||
+      updateRecord.proxyArtifact.commit !== record.proxy.commit
+    ) {
+      throw new Error("Detached update record is not bound to the signed legacy release.");
+    }
+    const proxyAsset = findUniqueAsset(descriptor, updateRecord.proxyArtifact.asset);
+    validateReleaseAssetUrl(proxyAsset.url);
+    if (proxyAsset.size !== updateRecord.proxyArtifact.size) {
+      throw new Error("Detached proxy artifact size does not agree with the authenticated release.");
+    }
+    const expectedNames = new Set([
+      "release.json",
+      "release.sig",
+      "update.json",
+      "update.sig",
+      record.claudex.asset,
+      updateRecord.proxyArtifact.asset
+    ]);
+    if (descriptor.assets.some((asset) => !expectedNames.has(asset.name))) {
+      throw new Error("Post-bridge release asset set is invalid.");
+    }
+    return {
+      descriptor,
+      record,
+      releaseCanonical,
+      updateRecord,
+      updateCanonical,
+      updateSignature,
+      proxyRuntime: {
+        version: updateRecord.proxyArtifact.version,
+        commit: updateRecord.proxyArtifact.commit.slice(0, 8),
+        tagCommit: updateRecord.proxyArtifact.commit,
+        asset: updateRecord.proxyArtifact.asset,
+        url: proxyAsset.url,
+        size: updateRecord.proxyArtifact.size,
+        sha256: updateRecord.proxyArtifact.sha256,
+        binarySha256: updateRecord.proxyArtifact.binarySha256
+      }
+    };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+async function selectAuthenticatedRelease(
+  source: ReleaseSource,
+  publicKeyPem: string,
+  stagingRoot?: string,
+  currentSequence = 0
+): Promise<AuthenticatedRelease> {
+  const enumerated = source.enumerate
+    ? await source.enumerate()
+    : source.candidates
+      ? await source.candidates()
+      : [await source.latest()];
+  const stable = enumerated.filter((descriptor) => !descriptor.draft && !descriptor.prerelease);
+  if (stable.length === 0) throw new Error("No stable Claudex release candidate was found.");
+  const authenticated: AuthenticatedRelease[] = [];
+  for (const descriptor of stable) {
+    authenticated.push(await authenticateRelease(descriptor, source, publicKeyPem, stagingRoot));
+  }
+  authenticated.sort((left, right) => right.record.sequence - left.record.sequence);
+  for (let index = 1; index < authenticated.length; index += 1) {
+    if (authenticated[index]?.record.sequence === authenticated[index - 1]?.record.sequence) {
+      throw new Error("Multiple signed releases claim the same sequence.");
+    }
+  }
+  const highest = authenticated[0] as AuthenticatedRelease;
+  if (currentSequence < PROXY_BRIDGE_SEQUENCE && highest.record.sequence >= PROXY_BRIDGE_SEQUENCE) {
+    const bridge = authenticated.find(
+      (candidate) => candidate.record.sequence === PROXY_BRIDGE_SEQUENCE
+    );
+    if (!bridge) {
+      throw new Error(`The permanent sequence ${PROXY_BRIDGE_SEQUENCE} bridge is unavailable.`);
+    }
+    return bridge;
+  }
+  return highest;
 }
 
 async function readLinkedRecord(link: string, releasesRoot: string): Promise<ReleaseRecord | null> {
@@ -1036,9 +1361,80 @@ async function readLinkedRecord(link: string, releasesRoot: string): Promise<Rel
   }
 }
 
+function knownBridgeRuntime(record: ReleaseRecord): ProxyRuntimeIdentity {
+  const runtime = KNOWN_PROXY_RUNTIMES.find(
+    (candidate) =>
+      candidate.version === record.proxy.version &&
+      candidate.commit === record.proxy.commit
+  );
+  if (!runtime) {
+    throw new Error(
+      "Bridge release proxy identity is not in the preserved certified runtime set."
+    );
+  }
+  return runtime;
+}
+
+async function runtimeForLocalRelease(
+  paths: UpdatePaths,
+  record: ReleaseRecord,
+  publicKeyPem: string
+): Promise<ProxyRuntimeIdentity> {
+  if (record.sequence <= PROXY_BRIDGE_SEQUENCE) {
+    return knownBridgeRuntime(record);
+  }
+  const directory = join(paths.releasesRoot, String(record.sequence));
+  let updateContents: string;
+  let encodedSignature: string;
+  try {
+    updateContents = await readFile(join(directory, "update.json"), "utf8");
+    encodedSignature = (await readFile(join(directory, "update.sig"), "utf8")).trim();
+  } catch {
+    throw new Error("Local detached update metadata is missing; rollback is unsafe.");
+  }
+  const updateRecord = parseUpdateRecord(updateContents);
+  const canonical = canonicalizeUpdateRecord(updateRecord);
+  if (updateContents.trim() !== canonical) {
+    throw new Error("Local detached update metadata is not canonical.");
+  }
+  if (
+    !verify(
+      null,
+      Buffer.from(canonical),
+      createPublicKey(publicKeyPem),
+      decodeSignature(encodedSignature, "Local detached update")
+    )
+  ) {
+    throw new Error("Local detached update signature verification failed.");
+  }
+  const releaseCanonical = canonicalizeReleaseRecord(record);
+  if (
+    updateRecord.repository !== record.repository ||
+    updateRecord.tag !== record.tag ||
+    updateRecord.sequence !== record.sequence ||
+    updateRecord.legacyReleaseSha256 !== createHash("sha256").update(releaseCanonical).digest("hex") ||
+    updateRecord.proxyArtifact.version !== record.proxy.version ||
+    updateRecord.proxyArtifact.commit !== record.proxy.commit
+  ) {
+    throw new Error("Local detached update metadata is not bound to the release record.");
+  }
+  return {
+    version: updateRecord.proxyArtifact.version,
+    commit: updateRecord.proxyArtifact.commit.slice(0, 8),
+    tagCommit: updateRecord.proxyArtifact.commit,
+    asset: updateRecord.proxyArtifact.asset,
+    // Rollback requires the already-verified immutable runtime; this URL is never used.
+    url: `https://github.com/router-for-me/CLIProxyAPI/releases/download/v${updateRecord.proxyArtifact.version}/${updateRecord.proxyArtifact.asset}`,
+    size: updateRecord.proxyArtifact.size,
+    sha256: updateRecord.proxyArtifact.sha256,
+    binarySha256: updateRecord.proxyArtifact.binarySha256
+  };
+}
+
 function validateRelease(
   descriptor: ReleaseDescriptor,
   record: ReleaseRecord,
+  proxyRuntime: ProxyRuntimeIdentity,
   platform: NodeJS.Platform,
   arch: string
 ): void {
@@ -1062,13 +1458,18 @@ function validateRelease(
   if (record.claudex.asset !== `claudex-${record.claudex.version}.tgz`) {
     throw new Error("Release Claudex artifact name is invalid.");
   }
-  if (
-    record.proxy.version !== PROXY_RUNTIME.version ||
-    record.proxy.commit !== PROXY_RUNTIME.commit
+  if (record.sequence <= PROXY_BRIDGE_SEQUENCE) {
+    if (
+      record.proxy.version !== proxyRuntime.version ||
+      record.proxy.commit !== proxyRuntime.commit
+    ) {
+      throw new Error("Bridge release proxy identity does not match its preserved certified runtime.");
+    }
+  } else if (
+    record.proxy.version !== proxyRuntime.version ||
+    record.proxy.commit !== proxyRuntime.tagCommit
   ) {
-    throw new Error(
-      `Release proxy identity must be ${PROXY_RUNTIME.version}/${PROXY_RUNTIME.commit}.`
-    );
+    throw new Error("Post-bridge release proxy identity does not match detached metadata.");
   }
   if (record.claude.identifier !== CERTIFIED_CLAUDE.identifier) {
     throw new Error(`Release Claude identifier must be ${CERTIFIED_CLAUDE.identifier}.`);
@@ -1367,6 +1768,7 @@ function candidateContext(
   record: ReleaseRecord,
   claudexRuntimeDir: string,
   claudeRuntimeDir: string,
+  proxyRuntime: ProxyRuntimeIdentity,
   expectedBootstrapSource: CandidateContext["expectedBootstrapSource"] = "current",
   expectedBootstrapSequence: number | null = record.sequence
 ): CandidateContext {
@@ -1377,6 +1779,7 @@ function candidateContext(
     claudexEntrypoint: join(claudexRuntimeDir, "dist", "cli.js"),
     claudeRuntimeDir,
     claudeBinary: join(claudeRuntimeDir, "claude"),
+    proxyRuntime,
     expectedBootstrapSource,
     expectedBootstrapSequence
   };
@@ -1404,6 +1807,7 @@ async function cleanupUnreferencedOlderPairs(
   const protectedSequences = new Set([current, previous].filter((value): value is string => value !== null));
   const protectedClaudex = new Set<string>();
   const protectedClaude = new Set<string>();
+  const protectedProxy = new Set<string>();
   const removable: Array<{ directory: string; record: ReleaseRecord }> = [];
   const packagedFallback = await readVerifiedPackagedFallback(paths);
   if (packagedFallback) protectedClaude.add(packagedFallback.claudeVersion);
@@ -1421,6 +1825,7 @@ async function cleanupUnreferencedOlderPairs(
     if (protectedSequences.has(entry.name) || release.sequence >= activeSequence) {
       protectedClaudex.add(release.claudex.version);
       protectedClaude.add(release.claude.version);
+      protectedProxy.add(release.proxy.version);
     } else {
       removable.push({ directory, record: release });
     }
@@ -1439,6 +1844,16 @@ async function cleanupUnreferencedOlderPairs(
         recursive: true,
         force: true
       });
+    }
+  }
+  const proxyRuntimeRoot = resolvePaths(paths.home).runtimeRoot;
+  for (const entry of await readdir(proxyRuntimeRoot, { withFileTypes: true }).catch(() => [])) {
+    if (
+      entry.isDirectory() &&
+      /^\d+\.\d+\.\d+$/.test(entry.name) &&
+      !protectedProxy.has(entry.name)
+    ) {
+      await rm(join(proxyRuntimeRoot, entry.name), { recursive: true, force: true });
     }
   }
 }
@@ -1519,9 +1934,24 @@ function parseUpdateJournal(value: unknown): UpdateJournal {
 async function restoreTransactionState(
   paths: UpdatePaths,
   journal: UpdateJournal,
-  restoreProxy: (paths: UpdatePaths, wasRunning: boolean) => Promise<void>
+  publicKeyPem: string,
+  restoreProxy: (
+    paths: UpdatePaths,
+    wasRunning: boolean,
+    runtime: ProxyRuntimeIdentity
+  ) => Promise<void>
 ): Promise<void> {
   const failures: unknown[] = [];
+  let priorProxyRuntime = PROXY_RUNTIME;
+  if (journal.oldCurrent !== null) {
+    const priorRecord = parseReleaseRecord(
+      await readFile(join(paths.releasesRoot, journal.oldCurrent, "release.json"), "utf8")
+    );
+    if (String(priorRecord.sequence) !== journal.oldCurrent) {
+      throw new Error("The pre-transaction release record does not match the recovery journal.");
+    }
+    priorProxyRuntime = await runtimeForLocalRelease(paths, priorRecord, publicKeyPem);
+  }
   const attempt = async (operation: () => Promise<void>): Promise<void> => {
     try {
       await operation();
@@ -1531,7 +1961,7 @@ async function restoreTransactionState(
   };
 
   if (typeof journal.proxyWasRunning === "boolean") {
-    await attempt(() => restoreProxy(paths, false));
+    await attempt(() => restoreProxy(paths, false, priorProxyRuntime));
   }
   await attempt(async () => {
     if (!(await restoreMutableState(paths))) {
@@ -1541,7 +1971,7 @@ async function restoreTransactionState(
   await attempt(() => replaceLink(paths.currentLink, journal.oldCurrent));
   await attempt(() => replaceLink(paths.previousLink, journal.oldPrevious));
   if (journal.proxyWasRunning === true) {
-    await attempt(() => restoreProxy(paths, true));
+    await attempt(() => restoreProxy(paths, true, priorProxyRuntime));
   }
 
   if (failures.length === 1) throw failures[0];
@@ -1631,7 +2061,12 @@ async function cleanupInterruptedTransaction(
 
 async function recoverJournal(
   paths: UpdatePaths,
-  restoreProxy: (paths: UpdatePaths, wasRunning: boolean) => Promise<void> = defaultRestoreProxy
+  publicKeyPem: string,
+  restoreProxy: (
+    paths: UpdatePaths,
+    wasRunning: boolean,
+    runtime: ProxyRuntimeIdentity
+  ) => Promise<void> = defaultRestoreProxy
 ): Promise<boolean> {
   let journal: UpdateJournal;
   try {
@@ -1641,7 +2076,7 @@ async function recoverJournal(
     if ((error as Error).message.includes("automatic recovery is unsafe")) throw error;
     throw new Error("Claudex update journal is malformed; automatic recovery is unsafe.");
   }
-  await restoreTransactionState(paths, journal, restoreProxy);
+  await restoreTransactionState(paths, journal, publicKeyPem, restoreProxy);
   await cleanupInterruptedTransaction(paths, journal);
   await rm(paths.journalFile, { force: true });
   await rm(paths.snapshotFile, { force: true });
@@ -1654,7 +2089,12 @@ export async function recoverInterruptedUpdate(
   paths: UpdatePaths,
   options: {
     isProcessAlive?: (pid: number) => boolean;
-    restoreProxy?: (paths: UpdatePaths, wasRunning: boolean) => Promise<void>;
+    restoreProxy?: (
+      paths: UpdatePaths,
+      wasRunning: boolean,
+      runtime: ProxyRuntimeIdentity
+    ) => Promise<void>;
+    publicKeyPem?: string;
     pid?: number;
   } = {}
 ): Promise<InterruptedUpdateRecovery> {
@@ -1671,7 +2111,11 @@ export async function recoverInterruptedUpdate(
     throw error;
   }
   try {
-    const recovered = await recoverJournal(paths, options.restoreProxy ?? defaultRestoreProxy);
+    const recovered = await recoverJournal(
+      paths,
+      options.publicKeyPem ?? RELEASE_PUBLIC_KEY_PEM,
+      options.restoreProxy ?? defaultRestoreProxy
+    );
     return recovered || hadLock ? "recovered" : "clean";
   } finally {
     await releaseLock();
@@ -1779,11 +2223,11 @@ export async function inspectManagedUpdateState(
 async function installRelease(
   paths: UpdatePaths,
   dependencies: UpdateDependencies,
-  descriptor: ReleaseDescriptor,
-  record: ReleaseRecord,
+  authenticated: AuthenticatedRelease,
   currentRecord: ReleaseRecord | null,
   previousRecord: ReleaseRecord | null
 ): Promise<UpdateResult> {
+  const { descriptor, record, proxyRuntime } = authenticated;
   if (dependencies.env.CLAUDEX_CLAUDE_BIN) {
     throw new Error("Unset CLAUDEX_CLAUDE_BIN before updating managed runtimes.");
   }
@@ -1809,6 +2253,10 @@ async function installRelease(
       message: `Claudex ${pair.claudexVersion} with Claude Code ${pair.claudeVersion} is up to date.`
     };
   }
+
+  const priorProxyRuntime = currentRecord
+    ? await runtimeForLocalRelease(paths, currentRecord, dependencies.publicKeyPem)
+    : PROXY_RUNTIME;
 
   const requiredBytes = record.claude.size + record.claudex.size * 3 + 64 * 1024 * 1024;
   const availableBytes = await dependencies.availableBytes(paths);
@@ -1866,19 +2314,43 @@ async function installRelease(
       { mode: 0o600, flag: "wx" }
     );
     await dependencies.verifyClaudeBinary(claudeBinary, record.claude);
+    // The immutable target proxy is downloaded and fully verified before any
+    // mutable state or transaction pointers are changed.
+    let proxyArchive: string | undefined;
+    if (authenticated.updateRecord) {
+      proxyArchive = join(staging, authenticated.updateRecord.proxyArtifact.asset);
+      const proxyAsset = findUniqueAsset(
+        descriptor,
+        authenticated.updateRecord.proxyArtifact.asset
+      );
+      await dependencies.releaseSource.download(proxyAsset.url, proxyArchive);
+      await chmod(proxyArchive, 0o600);
+      await verifyArtifact(
+        proxyArchive,
+        authenticated.updateRecord.proxyArtifact.size,
+        authenticated.updateRecord.proxyArtifact.sha256,
+        "Proxy artifact"
+      );
+    }
+    await dependencies.prepareProxyRuntime(paths, proxyRuntime, proxyArchive);
     await captureMutableState(paths);
     await writeJournal(paths, journal);
     await dependencies.onPhase("apply", "prepared");
-    proxyWasRunning = await dependencies.prepareProxy(paths, async (wasRunning) => {
-      proxyWasRunning = wasRunning;
-      journal.proxyWasRunning = wasRunning;
-      await writeJournal(paths, journal);
-    });
+    proxyWasRunning = await dependencies.prepareProxy(
+      paths,
+      proxyRuntime,
+      async (wasRunning) => {
+        proxyWasRunning = wasRunning;
+        journal.proxyWasRunning = wasRunning;
+        await writeJournal(paths, journal);
+      },
+      priorProxyRuntime
+    );
     if (journal.proxyWasRunning === null) {
       journal.proxyWasRunning = proxyWasRunning;
       await writeJournal(paths, journal);
     }
-    await dependencies.verifyCandidate(candidateContext(paths, record, stagedClaudex, stagedClaude));
+    await dependencies.verifyCandidate(candidateContext(paths, record, stagedClaudex, stagedClaude, proxyRuntime));
 
     const promotedClaudex = await promoteDirectory(stagedClaudex, targetClaudex);
     if (!promotedClaudex) {
@@ -1903,10 +2375,20 @@ async function installRelease(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       const stagedRelease = join(staging, "release-record");
       await mkdir(stagedRelease, { recursive: true, mode: 0o700 });
-      await writeFile(join(stagedRelease, "release.json"), `${canonicalizeReleaseRecord(record)}\n`, {
+      await writeFile(join(stagedRelease, "release.json"), `${authenticated.releaseCanonical}\n`, {
         mode: 0o600,
         flag: "wx"
       });
+      if (authenticated.updateCanonical && authenticated.updateSignature) {
+        await writeFile(join(stagedRelease, "update.json"), `${authenticated.updateCanonical}\n`, {
+          mode: 0o600,
+          flag: "wx"
+        });
+        await writeFile(join(stagedRelease, "update.sig"), `${authenticated.updateSignature}\n`, {
+          mode: 0o600,
+          flag: "wx"
+        });
+      }
       const promotedRelease = await promoteDirectory(stagedRelease, targetRelease);
       if (!promotedRelease) {
         const installed = parseReleaseRecord(
@@ -1929,8 +2411,8 @@ async function installRelease(
     journal.phase = "activated";
     await writeJournal(paths, journal);
     await dependencies.onPhase("apply", "activated");
-    await dependencies.verifyActivated(candidateContext(paths, record, targetClaudex, targetClaude));
-    await dependencies.restoreProxy(paths, proxyWasRunning);
+    await dependencies.verifyActivated(candidateContext(paths, record, targetClaudex, targetClaude, proxyRuntime));
+    await dependencies.restoreProxy(paths, proxyWasRunning, proxyRuntime);
     await rm(paths.journalFile, { force: true });
     await rm(paths.snapshotFile, { force: true });
     await cleanupUnreferencedOlderPairs(paths, record.sequence).catch(() => undefined);
@@ -1953,7 +2435,12 @@ async function installRelease(
     let restored = !(await pathExists(paths.journalFile));
     if (!restored) {
       try {
-        await restoreTransactionState(paths, journal, dependencies.restoreProxy);
+        await restoreTransactionState(
+          paths,
+          journal,
+          dependencies.publicKeyPem,
+          dependencies.restoreProxy
+        );
         restored = true;
       } catch (restoreError) {
         failure = new AggregateError(
@@ -2015,6 +2502,17 @@ async function rollbackRelease(
   }
 
   const targetRecord = previousRecord ?? currentRecord;
+  const priorProxyRuntime = await runtimeForLocalRelease(
+    paths,
+    currentRecord,
+    dependencies.publicKeyPem
+  );
+  const proxyRuntime = rollbackToPackaged
+    ? await runtimeForLocalRelease(paths, currentRecord, dependencies.publicKeyPem)
+    : await runtimeForLocalRelease(paths, targetRecord, dependencies.publicKeyPem);
+  if (!(await dependencies.verifyProxyRuntime(paths, proxyRuntime))) {
+    throw new Error("The rollback proxy runtime is missing or failed identity verification.");
+  }
   const claudexRuntimeDir = join(paths.claudexRuntimeRoot, targetRecord.claudex.version);
   const claudeRuntimeDir = join(paths.claudeRuntimeRoot, targetRecord.claude.version);
   await validateClaudexRuntime(
@@ -2049,11 +2547,16 @@ async function rollbackRelease(
     await captureMutableState(paths);
     await writeJournal(paths, journal);
     await dependencies.onPhase("rollback", "prepared");
-    proxyWasRunning = await dependencies.prepareProxy(paths, async (wasRunning) => {
-      proxyWasRunning = wasRunning;
-      journal.proxyWasRunning = wasRunning;
-      await writeJournal(paths, journal);
-    });
+    proxyWasRunning = await dependencies.prepareProxy(
+      paths,
+      proxyRuntime,
+      async (wasRunning) => {
+        proxyWasRunning = wasRunning;
+        journal.proxyWasRunning = wasRunning;
+        await writeJournal(paths, journal);
+      },
+      priorProxyRuntime
+    );
     if (journal.proxyWasRunning === null) {
       journal.proxyWasRunning = proxyWasRunning;
       await writeJournal(paths, journal);
@@ -2072,11 +2575,12 @@ async function rollbackRelease(
         targetRecord,
         claudexRuntimeDir,
         claudeRuntimeDir,
+        proxyRuntime,
         rollbackToPackaged ? "packaged" : "current",
         rollbackToPackaged ? null : targetRecord.sequence
       )
     );
-    await dependencies.restoreProxy(paths, proxyWasRunning);
+    await dependencies.restoreProxy(paths, proxyWasRunning, proxyRuntime);
     await rm(paths.journalFile, { force: true });
     await rm(paths.snapshotFile, { force: true });
   } catch (error) {
@@ -2086,7 +2590,12 @@ async function rollbackRelease(
     let restored = !(await pathExists(paths.journalFile));
     if (!restored) {
       try {
-        await restoreTransactionState(paths, journal, dependencies.restoreProxy);
+        await restoreTransactionState(
+          paths,
+          journal,
+          dependencies.publicKeyPem,
+          dependencies.restoreProxy
+        );
         restored = true;
       } catch (restoreError) {
         failure = new AggregateError(
@@ -2134,14 +2643,22 @@ export async function manageUpdate(
     const currentRecord = await readLinkedRecord(paths.currentLink, paths.releasesRoot);
     const previousRecord = await readLinkedRecord(paths.previousLink, paths.releasesRoot);
     const packagedFallback = currentRecord ? null : await readVerifiedPackagedFallback(paths);
-    const descriptor = await resolved.releaseSource.latest();
-    const targetRecord = await downloadSignedRecord(
-      descriptor,
+    const authenticated = await selectAuthenticatedRelease(
       resolved.releaseSource,
       resolved.publicKeyPem,
-      action === "apply" ? paths.home : undefined
+      action === "apply" ? paths.home : undefined,
+      currentRecord?.sequence ?? 0
     );
-    validateRelease(descriptor, targetRecord, resolved.platform, resolved.arch);
+    const { descriptor, record: targetRecord, proxyRuntime } = authenticated;
+    validateRelease(descriptor, targetRecord, proxyRuntime, resolved.platform, resolved.arch);
+    if (
+      targetRecord.sequence > PROXY_BRIDGE_SEQUENCE &&
+      Math.max(currentRecord?.sequence ?? 0, RELEASE_SEQUENCE) < PROXY_BRIDGE_SEQUENCE
+    ) {
+      throw new Error(
+        `Install the permanently reachable sequence ${PROXY_BRIDGE_SEQUENCE} bridge before a changed-proxy release.`
+      );
+    }
     if (currentRecord && targetRecord.sequence < currentRecord.sequence) {
       throw new Error("Refusing to downgrade or replay an older Claudex release.");
     }
@@ -2159,8 +2676,7 @@ export async function manageUpdate(
       return installRelease(
         paths,
         resolved,
-        descriptor,
-        targetRecord,
+        authenticated,
         currentRecord,
         previousRecord
       );
@@ -2194,7 +2710,7 @@ export async function manageUpdate(
   const releaseLock = await acquireUpdateLock(paths, resolved);
   try {
     await rm(paths.failureFile, { force: true });
-    await recoverJournal(paths, resolved.restoreProxy);
+    await recoverJournal(paths, resolved.publicKeyPem, resolved.restoreProxy);
     if (resolved.env.CLAUDEX_CLAUDE_BIN) {
       throw new Error("Unset CLAUDEX_CLAUDE_BIN before changing managed runtimes.");
     }

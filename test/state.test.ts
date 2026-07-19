@@ -18,6 +18,9 @@ describe("Claudex state", () => {
     expect(paths.updateLock).toBe(join(home, "run", "update.lock"));
     expect(paths.updateJournal).toBe(join(home, "run", "update-journal.json"));
     expect(paths.sessionStartLock).toBe(join(home, "run", "session-start.lock"));
+    expect(resolvePaths(home, "7.2.88").runtimeBinary).toBe(
+      join(home, "runtime", "cliproxyapi", "7.2.88", "cli-proxy-api")
+    );
 
     expect(first.apiKey).toBe(second.apiKey);
     expect(first.apiKey).toMatch(/^[A-Za-z0-9_-]{43}$/);

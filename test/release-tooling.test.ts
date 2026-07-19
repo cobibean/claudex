@@ -123,12 +123,13 @@ describe("release tooling", () => {
       `export const CLAUDEX_VERSION="0.2.0";
 export const RELEASE_SCHEMA_VERSION=1;
 export const RELEASE_REPOSITORY="cobibean/claudex";
+export const PROXY_BRIDGE_SEQUENCE=3;
 export const REVOKED_SEQUENCES=[];
 export const BOOTSTRAP_SCHEMA_VERSION=1;
 export const STATE_SCHEMA_VERSION=1;
 export const CERTIFIED_CLAUDE=${JSON.stringify({ ...RECORD.claude, platform: "darwin-arm64" })};`
     );
-    await writeFile(runtime, 'export const PROXY_RUNTIME={version:"7.2.80",commit:"09da52ad"};');
+    await writeFile(runtime, 'export const PROXY_RUNTIME={version:"7.2.80",commit:"09da52ad",tagCommit:"09da52ad509e2c18e7b9540db3b98c2214c280aa"};');
     const record = await generateReleaseRecord({
       assetPath: asset,
       sequence: 1,
